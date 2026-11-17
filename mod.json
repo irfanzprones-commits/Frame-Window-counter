@@ -1,0 +1,111 @@
+{
+	"geode": "5.11.2",
+	"gd": {
+		"win": "2.2081",
+		"android": "2.2081",
+		"mac": "2.2081",
+		"ios": "2.2081"
+	},
+	"version": "v0.2.0",
+	"id": "clirfan.gdfwr",
+	"name": "GDFWR - Frame Window Recorder",
+	"developer": "clirfan",
+	"description": "Records a run, proves it by replay, and measures the frame window of every click.",
+	"tags": [
+		"utility",
+		"gameplay"
+	],
+	"settings": {
+		"title-recording": {
+			"type": "title",
+			"name": "Recording"
+		},
+		"auto-save": {
+			"type": "bool",
+			"name": "Auto-save recordings",
+			"description": "Write a finished or partial recording to the gdfwr folder automatically.",
+			"default": true
+		},
+		"show-hud": {
+			"type": "bool",
+			"name": "Show recording HUD",
+			"description": "Small text in the top-left corner while recording (REC, number of actions).",
+			"default": true
+		},
+		"click-between-steps": {
+			"type": "bool",
+			"name": "Clicks are exact to 1 tick",
+			"description": "Turn this on when you play with click-between-frames/steps. Otherwise the mod assumes a click is only exact to 240 / FPS ticks and marks the file COARSE_INPUT.",
+			"default": false
+		},
+		"max-checkpoints": {
+			"type": "int",
+			"name": "Max saved states (at once)",
+			"description": "How many saved game states are kept at the same time while the clicks are measured (they use memory; lower this on a phone). A macro with more click edges than this is NOT refused: it is measured in parts, and the level is replayed once per part. Never lower than 8 in practice.",
+			"default": 1000,
+			"min": 50,
+			"max": 20000
+		},
+		"title-verify": {
+			"type": "title",
+			"name": "Analyze / verification"
+		},
+		"auto-repair": {
+			"type": "bool",
+			"name": "Auto-repair a failed verification",
+			"description": "When the player dies during the check, the click that was active is moved +1, +2 ... ticks later and then -1, -2 ... ticks earlier, until the run reaches the end of the level. The file becomes EDITED. Off = the check just reports the failure.",
+			"default": true
+		},
+		"repair-max-shift": {
+			"type": "int",
+			"name": "Auto-repair: largest shift (ticks)",
+			"description": "How far the click is moved in each direction before giving up.",
+			"default": 10,
+			"min": 1,
+			"max": 30
+		},
+		"search-reach": {
+			"type": "int",
+			"name": "Search beyond 12 ticks (up to)",
+			"description": "Every window is tested tick by tick up to 12 ticks on each side. A side that passes all of those is searched on up to this many ticks (steps of 4, then bisected), so wide windows get an exact value instead of 12+. 12 = off (fastest). Higher values save a second state per click edge, so very long macros reach the \\\"Max saved states\\\" limit sooner.",
+			"default": 12,
+			"min": 12,
+			"max": 120
+		},
+		"whole-click-window": {
+			"type": "bool",
+			"name": "Press window moves the release too (old rule)",
+			"description": "Default off: the press window moves only the press and the release window only the release, each action on its own. On = the v0.1 rule: the press window moves press and release together (the hold stays the same).",
+			"default": false
+		},
+		"title-replay": {
+			"type": "title",
+			"name": "Replay"
+		},
+		"precision-readout": {
+			"type": "bool",
+			"name": "Show precision readout",
+			"description": "Raw Precision (24h) in sigma/s at the bottom left of the replay. PROVISIONAL: the model is not confirmed yet.",
+			"default": true
+		},
+		"title-keys": {
+			"type": "title",
+			"name": "Hotkeys"
+		},
+		"key-panel": {
+			"type": "keybind",
+			"name": "Open the GDFWR panel",
+			"default": "Ctrl+Shift+G"
+		},
+		"key-record": {
+			"type": "keybind",
+			"name": "Start / stop recording",
+			"default": "Ctrl+Shift+R"
+		},
+		"key-pause-record": {
+			"type": "keybind",
+			"name": "Pause / resume recording",
+			"default": "Ctrl+Shift+P"
+		}
+	}
+}
