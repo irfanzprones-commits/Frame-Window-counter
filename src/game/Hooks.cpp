@@ -176,18 +176,44 @@ class $modify(GdfwrPlayLayer, PlayLayer) {
 class $modify(GdfwrPause, PauseLayer) {
     void customSetup() {
         PauseLayer::customSetup();
-        auto btn = CCMenuItemSpriteExtra::create(ButtonSprite::create("GDFWR", "bigFont.fnt", "GJ_button_01.png", .6f), this,
-                                                 menu_selector(GdfwrPause::onGdfwr));
-        if (auto* menu = this->getChildByID("right-button-menu")) {
-            menu->addChild(btn);
-            menu->updateLayout();
-        } else {
-            auto win = CCDirector::get()->getWinSize();
-            auto m = CCMenu::create();
-            m->setPosition({win.width - 50.f, win.height * 0.5f});
-            m->addChild(btn);
-            this->addChild(m);
+
+        // Draw a compact circular button instead of using the wide GJ button sprite.
+        constexpr float diameter = 44.f;
+        constexpr float radius = diameter * 0.5f;
+        constexpr int segments = 32;
+        CCPoint vertices[segments];
+        for (int i = 0; i < segments; ++i) {
+            float angle = float(i) * 6.2831853f / float(segments);
+            vertices[i] = CCPoint(radius + std::cos(angle) * (radius - 1.5f),
+                                  radius + std::sin(angle) * (radius - 1.5f));
         }
+
+        auto circle = CCNode::create();
+        circle->setContentSize({diameter, diameter});
+        auto draw = CCDrawNode::create();
+        draw->drawPolygon(vertices, segments,
+                          ccColor4F{0.16f, 0.17f, 0.19f, 1.f},
+                          1.5f,
+                          ccColor4F{0.72f, 0.74f, 0.78f, 1.f});
+        circle->addChild(draw);
+
+        auto label = CCLabelBMFont::create("FW", "bigFont.fnt");
+        label->setScale(0.38f);
+        label->setColor({255, 255, 255});
+        label->setPosition({radius, radius});
+        circle->addChild(label);
+
+        auto btn = CCMenuItemSpriteExtra::create(
+            circle, this, menu_selector(GdfwrPause::onGdfwr)
+        );
+
+        // Keep it in its own menu so right-button-menu cannot squeeze it beside another button.
+        auto win = CCDirector::get()->getWinSize();
+        auto menu = CCMenu::create();
+        menu->setPosition({0.f, 0.f});
+        menu->addChild(btn);
+        btn->setPosition({win.width - 48.f, win.height - 86.f});
+        this->addChild(menu);
     }
     void onGdfwr(CCObject*) { gdfwr::ui::openPanel(); }
 
