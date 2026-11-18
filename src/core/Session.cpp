@@ -1,6 +1,7 @@
 #include "Session.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <climits>
 #include <map>
 
@@ -43,6 +44,13 @@ std::vector<Event> finalRunEvents(const Macro& m) {
         return a.seq < b.seq;
     });
     return out;
+}
+
+bool tickStepLooksNormal(double delta, double timeWarp, double step) {
+    auto near = [&](double want) { return std::fabs(delta - want) <= want * 2e-3 + 1e-9; };
+    if (near(step)) return true;
+    if (timeWarp > 0.01 && timeWarp < 100.0) return near(step * timeWarp) || near(step / timeWarp);
+    return false;
 }
 
 uint64_t computeMacroHash(const Macro& m) {

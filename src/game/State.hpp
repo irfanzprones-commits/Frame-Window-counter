@@ -19,6 +19,7 @@ namespace gdfwr::game {
 
 using Hold = std::array<uint8_t, 2>;
 inline constexpr double kStep = 1.0 / 240.0;
+inline constexpr int kTpsConfirmSteps = 12;   // consecutive steps of the wrong length before the TPS counts as changed (a lag spike is not a TPS change)
 
 // Flags of OUR OWN re-simulation (verification / analysis). While `active`, all recording hooks stay out of the way.
 struct SimFlags {
@@ -62,6 +63,9 @@ struct State {
     double lastLevelTime = -1;
     bool justReset = true;
     bool tpsWarned = false;
+    // TPS watch: only whole ticks (not half ticks) are compared, and the TPS is only called changed after kTpsConfirmSteps odd steps in a row
+    int tpsLastTick = -1, tpsOffSteps = 0;
+    double tpsLastTime = -1;
     float fpsAvg = 60.f, fpsMin = 1000.f;
     int fpsSamples = 0;
 };

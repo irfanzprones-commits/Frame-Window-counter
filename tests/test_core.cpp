@@ -272,6 +272,9 @@ TEST(level_compare_and_gate) {
     CHECK(analysisGate(richFile(), true).empty());
     CHECK(!analysisGate(richFile(), false).empty());
     GdfwrFile p = richFile(); p.header.rec = RecStatus::Partial; CHECK(!analysisGate(p, true).empty());   // recorded, never finished: refused
+    GdfwrFile tw = richFile(); tw.header.warnings.push_back({std::string(code::TpsChanged), ""});
+    CHECK(analysisGate(tw, true).empty());                                                               // a TPS warning no longer blocks Analyze: the check replays at 240 TPS and fails by itself if the recording was not
+    GdfwrFile t2 = richFile(); t2.timing.tps = 360; CHECK(!analysisGate(t2, true).empty());                // but a file that says it was recorded at another TPS is still refused
     // There is no Verify button: the verification is step 1 of Analyze. So an IMPORTED file (PARTIAL until a verification reaches the
     // end of the level, D2) must pass the gate, otherwise nothing could ever verify it.
     GdfwrFile ip = richFile(); ip.header.rec = RecStatus::Partial; ip.header.origin = Origin::Imported;
@@ -779,6 +782,16 @@ TEST(v2_chunked_analysis_equals_one_pass) {
     AnalysisEngine e(inputFor(g, 800), p, mg); e.runAll();
     AnalysisData part; mergeAnalysis(part, e.result(), 0, 1);
     CHECK(part.clicks[0].in.analysed); CHECK(!part.clicks[1].in.analysed); CHECK(part.clicks[1].flags & ClickFlag::NotAnalysed); CHECK_EQ(part.counters.notAnalysed, 2);
+}
+
+TEST(v2_tick_step_test) {
+    const double st = 1.0 / 240.0;
+    CHECK(tickStepLooksNormal(st, 1.0)); CHECK(tickStepLooksNormal(st + 2e-9, 1.0)); CHECK(tickStepLooksNormal(float(st), 1.0));   // float noise
+    CHECK(tickStepLooksNormal(st * 0.5, 0.5)); CHECK(tickStepLooksNormal(st * 2.0, 0.5));                                           // time warp scales the step
+    CHECK(tickStepLooksNormal(st * 1.5, 1.5)); CHECK(tickStepLooksNormal(st / 1.5, 1.5));
+    CHECK(!tickStepLooksNormal(st * 0.5, 1.0)); CHECK(!tickStepLooksNormal(1.0 / 480.0, 1.0)); CHECK(!tickStepLooksNormal(1.0 / 360.0, 1.0));   // a real 480 / 360 TPS
+    CHECK(!tickStepLooksNormal(0.0, 1.0)); CHECK(!tickStepLooksNormal(-st, 1.0)); CHECK(!tickStepLooksNormal(st * 3.0, 1.0));
+    CHECK(!tickStepLooksNormal(st * 0.5, 0.0));                                                                                      // an invalid time warp is never an excuse
 }
 
 int main() {

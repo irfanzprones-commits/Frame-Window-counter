@@ -49,9 +49,24 @@ class $modify(GdfwrBaseLayer, GJBaseGameLayer) {
         if (S.session.capturing() && !S.justReset) {
             // the counter must go up by exactly 1 per call, and one tick must last 1/240 s (Part 1, 2.4)
             if (S.lastTick >= 0 && tick != S.lastTick + 1) S.session.flagSegment(gdfwr::SegFlag::UnreliableTick);
-            if (S.lastLevelTime >= 0 && tick == S.lastTick + 1 && std::fabs((now - S.lastLevelTime) - G::kStep) > 1e-6 && !S.tpsWarned) {
-                S.tpsWarned = true;
-                S.session.onTpsChange(tick, 240.f, float(1.0 / std::max(1e-6, now - S.lastLevelTime)));
+            // TPS watch. Only whole ticks are compared (a half tick has half the length), time warp is allowed for, and one odd step
+            // (a lag spike, a pause, a checkpoint) is not enough: the step must be wrong kTpsConfirmSteps times in a row.
+            if (!isHalfTick) {
+                if (S.tpsLastTick >= 0 && tick == S.tpsLastTick + 1) {
+                    double delta = now - S.tpsLastTime;
+                    double tw = m_gameState.m_timeWarp;
+                    if (gdfwr::tickStepLooksNormal(delta, tw)) {
+                        S.tpsOffSteps = 0;
+                    } else if (++S.tpsOffSteps >= G::kTpsConfirmSteps && !S.tpsWarned) {
+                        S.tpsWarned = true;
+                        log::warn("GDFWR: the step length looked wrong {} times in a row (delta {} s, time warp {}): marking TPS_CHANGED", S.tpsOffSteps, delta, tw);
+                        S.session.onTpsChange(tick, 240.f, float(1.0 / std::max(1e-6, delta)));
+                    }
+                } else {
+                    S.tpsOffSteps = 0;
+                }
+                S.tpsLastTick = tick;
+                S.tpsLastTime = now;
             }
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
@@ -84,6 +99,8 @@ class $modify(GdfwrPlayLayer, PlayLayer) {
         S.justReset = true;
         S.lastTick = -1;
         S.lastLevelTime = -1;
+        S.tpsLastTick = -1;
+        S.tpsOffSteps = 0;
         if (S.pendingStart) {  // the restart that Record triggered: segment 0 starts here
             S.pendingStart = false;
             G::beginSession(this);
@@ -176,44 +193,18 @@ class $modify(GdfwrPlayLayer, PlayLayer) {
 class $modify(GdfwrPause, PauseLayer) {
     void customSetup() {
         PauseLayer::customSetup();
-
-        // Draw a compact circular button instead of using the wide GJ button sprite.
-        constexpr float diameter = 44.f;
-        constexpr float radius = diameter * 0.5f;
-        constexpr int segments = 32;
-        CCPoint vertices[segments];
-        for (int i = 0; i < segments; ++i) {
-            float angle = float(i) * 6.2831853f / float(segments);
-            vertices[i] = CCPoint(radius + std::cos(angle) * (radius - 1.5f),
-                                  radius + std::sin(angle) * (radius - 1.5f));
+        auto btn = CCMenuItemSpriteExtra::create(ButtonSprite::create("GDFWR", "bigFont.fnt", "GJ_button_01.png", .6f), this,
+                                                 menu_selector(GdfwrPause::onGdfwr));
+        if (auto* menu = this->getChildByID("right-button-menu")) {
+            menu->addChild(btn);
+            menu->updateLayout();
+        } else {
+            auto win = CCDirector::get()->getWinSize();
+            auto m = CCMenu::create();
+            m->setPosition({win.width - 50.f, win.height * 0.5f});
+            m->addChild(btn);
+            this->addChild(m);
         }
-
-        auto circle = CCNode::create();
-        circle->setContentSize({diameter, diameter});
-        auto draw = CCDrawNode::create();
-        draw->drawPolygon(vertices, segments,
-                          ccColor4F{0.16f, 0.17f, 0.19f, 1.f},
-                          1.5f,
-                          ccColor4F{0.72f, 0.74f, 0.78f, 1.f});
-        circle->addChild(draw);
-
-        auto label = CCLabelBMFont::create("FW", "bigFont.fnt");
-        label->setScale(0.38f);
-        label->setColor({255, 255, 255});
-        label->setPosition({radius, radius});
-        circle->addChild(label);
-
-        auto btn = CCMenuItemSpriteExtra::create(
-            circle, this, menu_selector(GdfwrPause::onGdfwr)
-        );
-
-        // Keep it in its own menu so right-button-menu cannot squeeze it beside another button.
-        auto win = CCDirector::get()->getWinSize();
-        auto menu = CCMenu::create();
-        menu->setPosition({0.f, 0.f});
-        menu->addChild(btn);
-        btn->setPosition({win.width - 48.f, win.height - 86.f});
-        this->addChild(menu);
     }
     void onGdfwr(CCObject*) { gdfwr::ui::openPanel(); }
 

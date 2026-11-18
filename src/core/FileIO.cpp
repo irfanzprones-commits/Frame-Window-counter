@@ -449,7 +449,8 @@ bool hasWarning(const GdfwrFile& f, std::string_view c) {
 std::string analysisGate(const GdfwrFile& f, bool levelMatches) {
     if (f.level.platformer) return "Platformer levels are not supported.";
     if (f.timing.tps != kTps) return "Analysis needs 240 TPS.";
-    if (hasWarning(f, code::TpsChanged)) return "The TPS changed during the recording.";
+    // TPS_CHANGED is only a warning now: the first step of Analyze replays the macro at 240 TPS, and a macro that was recorded at another
+    // TPS does not survive that replay (the check says so). Refusing here blocked recordings on a detector that can be wrong.
     if (!f.macro.finalRun.exists) return "The recording has no final run.";
     // An imported macro stays PARTIAL until a verification reaches the end of the level (D2). That verification is step 1 of
     // Analyze (there is no separate Verify button), so Analyze must accept an imported PARTIAL file. A recorded PARTIAL file

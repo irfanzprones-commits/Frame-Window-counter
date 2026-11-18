@@ -40,7 +40,7 @@ std::string describeCode(std::string const& c) {
         {"LEVEL_MISMATCH", "This file belongs to a different level."},
         {"LEVEL_CHANGED", "The level data changed since the file was made. Analyze again."},
         {"DERIVED_DROPPED", "A damaged derived section (baseline or analysis) was dropped."},
-        {"TPS_CHANGED", "The TPS changed during the recording. Analysis is refused."},
+        {"TPS_CHANGED", "The step length looked different for a while during the recording (TPS bypass or a game slowdown?). Analysis still runs: if the macro was not recorded at 240 TPS, the check at the start of Analyze fails and says so."},
         {"UNRELIABLE_INPUT", "An input event may have been missed in a segment."},
         {"UNRELIABLE_TICK", "The tick counter was not trustworthy in a segment."},
         {"INVALID_SEQUENCE", "Press and release do not alternate. Fix it first."},
@@ -73,6 +73,8 @@ void beginSession(PlayLayer* pl) {
     cfg.createdUtc = std::time(nullptr);
     cfg.randomUncaptured = !randomTriggerXs(pl).empty();  // seeds / branches are not captured in v1 (Part 1, 2.6)
     S.tpsWarned = false;
+    S.tpsOffSteps = 0;
+    S.tpsLastTick = -1;
     S.lastTick = -1;
     S.session.begin(cfg, tickOf(pl), holdState(pl, {0, 0}));
 }

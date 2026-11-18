@@ -13,6 +13,10 @@ bool computeFinalRun(Macro& m, int endSegment, bool partial, std::vector<Warning
 
 // Events of the final run sorted by (editedTick, junction events first, seq). Uses edited ticks.
 std::vector<Event> finalRunEvents(const Macro& m);
+// Does one physics step last 1/240 s of level time (the TPS is unchanged)? A time-warp trigger scales the level time per step, so
+// the step is also accepted when it equals step * timeWarp or step / timeWarp. The tolerance is relative (0.2 %), not 1e-6 s:
+// a recording must not be marked "TPS changed" by float noise, a lag spike or a time warp.
+bool tickStepLooksNormal(double delta, double timeWarp, double step = 1.0 / 240.0);
 uint64_t computeMacroHash(const Macro& m);
 int countActions(const Macro& m);  // press + release events of the final run
 
