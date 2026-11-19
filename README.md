@@ -41,6 +41,8 @@ Everything that depends on a GD 2.2081 / Geode binding name is marked `[BINDING]
 5. Hook signatures in `Hooks.cpp`: `removeCheckpoint(bool)`, `storeCheckpoint(CheckpointObject*)`, `pauseGame(bool)`, `resume()`, `PauseLayer::customSetup/onQuit`.
 6. Geode v5 UI/API: `Popup::init(w,h)`, virtual `Popup::onClose`, `addChildAtPosition(node, Anchor, offset, bool)`, `file::pick` + `async::spawn`, `listenForKeybindSettingPresses`, the keybind default format in `mod.json`, the 4-argument `ButtonSprite::create`.
 7. `GJGameLevel::m_levelVersion`, `m_levelID.value()`, `m_levelString` (level identity and hash), random-trigger object IDs 1912 / 2068.
+8. (0.2.1, optional) `PlayLayer::m_anticheatSpike`: `Bridge::isAnticheatSpike`. Written so that it compiles without the member (it then answers "no"). If `Analyze`
+   dies at tick 2 even now, the failure message names the object that killed the player; send that line and the Geode log lines `GDFWR: stepper check` / `GDFWR: death at tick`.
 
 ### The one real risk of the design
 Verification and analysis restore game states with the game's own practice checkpoints. If 2.2081 checkpoints do not restore

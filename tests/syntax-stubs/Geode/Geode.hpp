@@ -50,6 +50,7 @@ public:
     CCNode* getChildByID(char const*) { return nullptr; }
     template <class T> T* getChildByType(int) { return nullptr; }
     void updateLayout() {}
+    void setID(std::string const&) {}
     template <class A> void addChildAtPosition(CCNode*, A, CCPoint = CCPoint(), bool = true) {}
     static CCNode* create() { return new CCNode; }
 };
@@ -165,6 +166,13 @@ public:
     static ButtonSprite* create(char const*) { return new ButtonSprite; }
     static ButtonSprite* create(char const*, char const*, char const*, float) { return new ButtonSprite; }
 };
+enum class CircleBaseColor { Green, Pink, Blue, Cyan, Gray };
+enum class CircleBaseSize { Tiny, Small, Medium, MediumAlt, Big };
+class CircleButtonSprite : public cocos2d::CCSprite {
+public:
+    static CircleButtonSprite* create(cocos2d::CCNode*, CircleBaseColor = CircleBaseColor::Green, CircleBaseSize = CircleBaseSize::Medium) { return new CircleButtonSprite; }
+};
+inline std::string operator""_spr(char const* s, size_t n) { return "clirfan.gdfwr/" + std::string(s, n); }
 class CCMenuItemSpriteExtra : public cocos2d::CCMenuItemSprite {
 public:
     static CCMenuItemSpriteExtra* create(cocos2d::CCNode*, cocos2d::CCObject*, cocos2d::SEL_MenuHandler) { return new CCMenuItemSpriteExtra; }
@@ -224,6 +232,7 @@ public:
     virtual void onQuit() {}
     virtual void checkForEnd() {}
     bool m_isPaused = false;                   // 2.2081 PlayLayer
+    GameObject* m_anticheatSpike = nullptr;    // OPTIONAL binding: Bridge.cpp isAnticheatSpike compiles with and without it (see tests/verify_sim.sh)
     virtual void startGame() {}
     void playEndAnimationToPos(cocos2d::CCPoint) {}
     void togglePracticeMode(bool) {}

@@ -162,6 +162,54 @@ char const* levelEndReason(PlayLayer* pl, float startX) {
     return nullptr;
 }
 
+// ---- what killed the player in our own run (v0.2.1) -----------------------------------------------------------------------------
+// [BINDING, optional] PlayLayer::m_anticheatSpike. The generic lambda makes the member optional: where the SDK has no such member (or it
+// cannot be compared with a GameObject*) the requires-expression is false and the answer is simply "no", with no compile error.
+bool isAnticheatSpike(PlayLayer* pl, GameObject* obj) {
+    return [&](auto* l) -> bool {
+        if constexpr (requires { l->m_anticheatSpike == obj; }) return l && obj && l->m_anticheatSpike == obj;
+        else return false;
+    }(pl);
+}
+
+namespace {
+void noteKiller(PlayerObject* player, GameObject* obj) {
+    auto& k = State::get().sim;
+    k.killerSeen = true;
+    k.killerHasObject = obj != nullptr;
+    k.killerId = obj ? int(obj->m_objectID) : 0;
+    k.killerX = obj ? obj->getPositionX() : 0.f;
+    k.killerY = obj ? obj->getPositionY() : 0.f;
+    k.killedX = player ? player->getPositionX() : 0.f;
+    k.killedY = player ? player->getPositionY() : 0.f;
+}
+
+void noteIgnoredAnticheat(PlayLayer* pl) {
+    static int s_logged = 0;
+    if (s_logged++ >= 5) return;   // the first few are enough for the log
+    log::info("GDFWR: ignored a destroyPlayer call made with the game's anti-cheat spike (tick {}, player x {:.0f})", tickOf(pl), playerX(pl));
+}
+}  // namespace
+
+void simDestroyPlayer(PlayLayer* pl, PlayerObject* player, GameObject* obj) {
+    auto& S = State::get();
+    if (isAnticheatSpike(pl, obj)) { noteIgnoredAnticheat(pl); return; }
+    if (!S.sim.dead) noteKiller(player, obj);   // the FIRST call of the tick is the one that is reported
+    S.sim.dead = true;
+    S.sim.diedMask |= (pl && player == pl->m_player2 && player != pl->m_player1) ? 2 : 1;
+}
+
+std::string killerText() {
+    auto const& k = State::get().sim;
+    if (!k.killerSeen) return {};
+    char b[240];
+    if (!k.killerHasObject)
+        std::snprintf(b, sizeof b, "Killed by: no object at all (destroyPlayer was called without one); player at (%.0f, %.0f).", k.killedX, k.killedY);
+    else
+        std::snprintf(b, sizeof b, "Killed by: object id %d at (%.0f, %.0f); player at (%.0f, %.0f).", k.killerId, k.killerX, k.killerY, k.killedX, k.killedY);
+    return b;
+}
+
 // ---- is the silent simulation really running? ----------------------------------------------------------------------------------
 // The most damaging failure of all: the simulated player does not move (or does not move like in the real game), so the run
 // neither dies nor ends and every verification says "did not reach the end". Before a verification the level is restarted and
@@ -170,13 +218,20 @@ char const* levelEndReason(PlayLayer* pl, float startX) {
 namespace {
 constexpr int kProbeTicks = 60;
 
+// What one probe run saw. v0.2.1: a run in which the player moved a little and then DIED is not a run that works.
+struct ProbeRun {
+    float dist = 0.f;
+    bool died = false;
+    int deathTick = -1;
+};
+
 void kickStart(PlayLayer* pl) {
     if (!pl || pl->m_started) return;
     pl->startGame();                       // [BINDING] the game does this a moment AFTER a restart, in real time
     if (!pl->m_started) pl->m_started = true;
 }
 
-float probeRun(PlayLayer* pl, StepMode mode, bool kick) {
+ProbeRun probeRun(PlayLayer* pl, StepMode mode, bool kick) {
     auto& S = State::get();
     pl->resetLevelFromStart();
     clearEndFlags(pl);
@@ -184,11 +239,38 @@ float probeRun(PlayLayer* pl, StepMode mode, bool kick) {
     if (kick) kickStart(pl);
     S.stepMode = mode;
     float x0 = playerX(pl);
+    ProbeRun r;
     for (int i = 0; i < kProbeTicks; i++) {
         stepTick(pl);
-        if (S.sim.dead || S.sim.done) break;
+        if (S.sim.dead) {
+            r.died = true;
+            r.deathTick = i;
+            log::info("GDFWR: stepper probe ({}{}): the player died at tick {} with no click applied. {}", mode == StepMode::Direct ? "direct" : "update",
+                      kick ? ", start kick" : "", i, killerText());
+            break;
+        }
+        if (S.sim.done) break;
     }
-    return playerX(pl) - x0;
+    r.dist = playerX(pl) - x0;
+    return r;
+}
+
+std::string probeText(ProbeRun const& p) {
+    char b[64];
+    if (p.died) std::snprintf(b, sizeof b, "%+.1f (died at tick %d)", p.dist, p.deathTick);
+    else std::snprintf(b, sizeof b, "%+.1f", p.dist);
+    return b;
+}
+
+// Which way of stepping to use. Moving is not enough: a way in which the player dies within the first ticks (no click was applied) does
+// not work, even though the player moved a little before it died. Before v0.2.1 only the distance counted: with "direct +60, update +2"
+// (update killed the player at tick 2) the rule below picked update, because the two distances differ.
+StepMode pickMode(ProbeRun const& A, ProbeRun const& B, float moved) {
+    bool a = A.dist > moved, u = B.dist > moved;           // moved at all
+    bool aAlive = a && !A.died, uAlive = u && !B.died;     // moved and got through the whole probe alive
+    if (aAlive != uAlive) return aAlive ? StepMode::Direct : StepMode::Update;                       // only one of them works
+    if (A.died && B.died && A.deathTick != B.deathTick) return A.deathTick > B.deathTick ? StepMode::Direct : StepMode::Update;  // both die: the later death
+    return (a && (!u || std::fabs(A.dist - B.dist) <= 0.5f)) ? StepMode::Direct : StepMode::Update;  // the old rule: same distance = the faster one
 }
 }  // namespace
 
@@ -200,30 +282,32 @@ StepProbe calibrateStepper(PlayLayer* pl) {
     S.stepText.clear();
     if (!pl) return r;
     constexpr float kMoved = 1.f;
-    char b[200];
     for (int pass = 0; pass < 2; pass++) {
         bool kick = pass == 1;
         if (kick) {
             pl->resetLevelFromStart();
             if (pl->m_started) continue;   // nothing to kick: the game had already started on its own
         }
-        float dA = probeRun(pl, StepMode::Direct, kick);
-        float dB = probeRun(pl, StepMode::Update, kick);
-        std::snprintf(b, sizeof b, "%sdirect %+.1f, update %+.1f", kick ? "after start kick: " : "", dA, dB);
+        ProbeRun A = probeRun(pl, StepMode::Direct, kick);
+        ProbeRun B = probeRun(pl, StepMode::Update, kick);
+        std::string line = std::string(kick ? "after start kick: " : "") + "direct " + probeText(A) + ", update " + probeText(B);
         if (!S.stepText.empty()) S.stepText += "; ";
-        S.stepText += b;
-        bool a = dA > kMoved, u = dB > kMoved;
+        S.stepText += line;
+        bool a = A.dist > kMoved, u = B.dist > kMoved;
         if (!a && !u) continue;
         r.moved = true;
         r.kick = kick;
-        r.mode = (a && (!u || std::fabs(dA - dB) <= 0.5f)) ? StepMode::Direct : StepMode::Update;
+        r.mode = pickMode(A, B, kMoved);
+        ProbeRun const& chosen = r.mode == StepMode::Direct ? A : B;
+        r.died = chosen.died;
+        r.deathTick = chosen.deathTick;
         break;
     }
     S.stepMode = r.mode;
     S.stepKick = r.kick;
     r.text = S.stepText;
-    log::info("GDFWR: stepper check: {} -> {}{}", r.text, r.moved ? (r.mode == StepMode::Direct ? "direct" : "update") : "the player did not move",
-              r.kick ? " (with start kick)" : "");
+    log::info("GDFWR: stepper check: {} -> {}{}{}", r.text, r.moved ? (r.mode == StepMode::Direct ? "direct" : "update") : "the player did not move",
+              r.kick ? " (with start kick)" : "", r.died ? " (the player still dies at tick " + std::to_string(r.deathTick) + " in the probe in this way)" : "");
     restartForSim(pl);
     return r;
 }

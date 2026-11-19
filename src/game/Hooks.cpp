@@ -138,9 +138,8 @@ class $modify(GdfwrPlayLayer, PlayLayer) {
 
     void destroyPlayer(PlayerObject* player, GameObject* obj) {
         auto& S = G::State::get();
-        if (S.sim.active) {  // our own run: remember who died, skip the death animation
-            S.sim.dead = true;
-            S.sim.diedMask |= (player == m_player2 && player != m_player1) ? 2 : 1;
+        if (S.sim.active) {  // our own run: remember who died and what killed it, skip the death animation (the anti-cheat spike is ignored)
+            G::simDestroyPlayer(this, player, obj);
             return;
         }
         PlayLayer::destroyPlayer(player, obj);
@@ -193,15 +192,20 @@ class $modify(GdfwrPlayLayer, PlayLayer) {
 class $modify(GdfwrPause, PauseLayer) {
     void customSetup() {
         PauseLayer::customSetup();
-        auto btn = CCMenuItemSpriteExtra::create(ButtonSprite::create("GDFWR", "bigFont.fnt", "GJ_button_01.png", .6f), this,
-                                                 menu_selector(GdfwrPause::onGdfwr));
-        if (auto* menu = this->getChildByID("right-button-menu")) {
+        // A round button ("FW") on the LEFT side of the pause screen.
+        auto label = CCLabelBMFont::create("FW", "bigFont.fnt");
+        label->setScale(.8f);
+        auto sprite = CircleButtonSprite::create(label, CircleBaseColor::Green, CircleBaseSize::Medium);
+        auto btn = CCMenuItemSpriteExtra::create(sprite, this, menu_selector(GdfwrPause::onGdfwr));
+        btn->setID("gdfwr-button"_spr);
+        if (auto* menu = this->getChildByID("left-button-menu")) {   // the game's own left column: the layout places it
             menu->addChild(btn);
             menu->updateLayout();
-        } else {
+        } else {                                                     // no such menu in this build: our own, at the left edge
             auto win = CCDirector::get()->getWinSize();
             auto m = CCMenu::create();
-            m->setPosition({win.width - 50.f, win.height * 0.5f});
+            m->setID("gdfwr-menu"_spr);
+            m->setPosition({38.f, win.height * 0.5f});
             m->addChild(btn);
             this->addChild(m);
         }

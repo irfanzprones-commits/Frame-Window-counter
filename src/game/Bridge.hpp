@@ -26,6 +26,8 @@ struct StepProbe {
     bool moved = false;
     StepMode mode = StepMode::Direct;
     bool kick = false;
+    bool died = false;       // v0.2.1: the player died inside the probe even in the way that was chosen (no click was applied)
+    int deathTick = -1;
     std::string text;
 };
 // Restarts the level from the start and finds the way of stepping (and the start-up kick) that makes the player move. The choice is
@@ -35,6 +37,16 @@ StepProbe calibrateStepper(PlayLayer* pl);
 void restartForSim(PlayLayer* pl);
 // One line of facts about the simulated game, for the failure report: "x 0 -> 44, end portal x 4000, started 1, paused 0 ...".
 std::string simDiagnostics(PlayLayer* pl, float startX);
+
+// ---- what killed the player in OUR OWN run (v0.2.1: for the failure report and the log) ----
+// [BINDING, optional] true when `obj` is the game's own anti-cheat spike (PlayLayer::m_anticheatSpike). It is not a hazard of the level
+// (noclip mods let it through on purpose). Always false on an SDK that has no such member: the code then simply compiles without it.
+bool isAnticheatSpike(PlayLayer* pl, GameObject* obj);
+// What the destroyPlayer hook does in OUR OWN run (Hooks.cpp calls it; tests/verify_sim_test.cpp calls it too): a call made with the anti-cheat
+// spike is ignored (it is not a hazard of the level); any other call is a death: State::sim.dead is set and the facts are recorded.
+void simDestroyPlayer(PlayLayer* pl, PlayerObject* player, GameObject* obj);
+// "Killed by: object id 8 at (x, y); player at (x, y)." Empty when the hook saw no call.
+std::string killerText();
 
 // ---- end of the level, for OUR OWN simulation (verification / analysis) ----
 // The game ends a level with an animation and a DELAYED levelComplete() (a timed action on the PlayLayer). Our stepping is

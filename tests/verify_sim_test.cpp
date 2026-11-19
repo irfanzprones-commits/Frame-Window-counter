@@ -32,6 +32,9 @@ struct FakeGame : PlayLayer {
     bool needsKick = false;     // nothing moves until startGame() was called (or m_started set)
     bool updateOnly = false;    // processCommands does not move the player, update() does
     bool broken = false;        // nothing ever moves
+    bool updateMoves = false;   // update() moves the player too (like the real game) ...
+    int updateKillTick = -1;    // ... but the player dies at this tick in update() (a start-up problem of that way of stepping, not the macro)
+    int directKillTick = -1;    // the same for processCommands
     float portalX = 1000.f;
     float x = 0;
     int tick = 0;
@@ -39,6 +42,7 @@ struct FakeGame : PlayLayer {
     EndPortalObject portal;
     PlayerObject p1;
     FakeGame() {
+        m_anticheatSpike = &acSpike; acSpike.m_objectID = 8;   // same id as an ordinary spike: only the pointer identifies it
         m_player1 = &p1;
         m_endPortal = &portal;
         portal.setPositionX(portalX);
@@ -60,7 +64,7 @@ struct FakeGame : PlayLayer {
             if (o.tick != tick) continue;
             bool ok = false;
             for (int p : presses) if (p >= o.lo && p <= o.hi) ok = true;
-            if (!ok) { auto& S = G::State::get(); S.sim.dead = true; S.sim.diedMask |= 1; return; }
+            if (!ok) return die();
         }
         x += 1; tick++;
         m_gameState.m_levelTime = tick / 240.0;
@@ -75,8 +79,23 @@ struct FakeGame : PlayLayer {
         m_gameState.m_levelTime = tick / 240.0;
         p1.setPositionX(x);
     }
-    void processCommands(float, bool, bool) override { if (!updateOnly) step(); }
-    void update(float) override { if (updateOnly) step(); }
+    GameObject killer, acSpike;
+    int antiCheatTick = -1;     // update()/processCommands() make the game's own anti-cheat call (destroyPlayer with its spike) at this tick
+    void die() { killer.m_objectID = 8; killer.setPosition({x + 5.f, 105.f}); G::simDestroyPlayer(this, &p1, &killer); }
+    void antiCheatCall() { if (antiCheatTick >= 0 && tick == antiCheatTick) G::simDestroyPlayer(this, &p1, &acSpike); }
+    void processCommands(float, bool, bool) override {
+        if (updateOnly) return;
+        antiCheatCall();
+        if (directKillTick >= 0 && tick == directKillTick) return die();
+        step();
+    }
+    void update(float) override {
+        if (updateOnly) return step();
+        if (!updateMoves) return;
+        antiCheatCall();
+        if (updateKillTick >= 0 && tick == updateKillTick) return die();
+        step();
+    }
 };
 
 static GdfwrFile makeFile(std::vector<std::array<int, 3>> acts, int endTick = 1000) {  // {tick, player, press}
@@ -312,6 +331,71 @@ int main() {
         CHECK(a.failed()); CHECK(a.message().find("tick 150") != std::string::npos);
         CHECK(a.file().analysis.has_value() && a.file().analysis->incomplete);
         geode::Mod::stubInts()["max-checkpoints"] = 3000;
+    }
+    // T15 (the report \"The player died at tick 2\" on a level with one spike): update() kills the player at tick 2 for a reason that has
+    // nothing to do with the macro, processCommands() runs fine. The stepper check must not pick the way that dies.
+    {
+        Rig r; r.game.updateMoves = true; r.game.updateKillTick = 2; r.game.obstacles = {{110, 95, 105}};
+        auto f = makeFile({{100, 0, 1}, {150, 0, 0}});
+        G::VerifyJob j(&r.game, f, r.sim); runToEnd(j);
+        CHECK(j.ok());
+        CHECK(G::State::get().stepMode == G::StepMode::Direct);
+        CHECK(j.repairs().empty());
+    }
+    // T16: BOTH ways of stepping kill the player at tick 2 (the player has not met anything): it is reported as it is, and the report says what
+    // killed it and how the game was stepped, so that a start-up problem can be told from a bad click
+    {
+        Rig r; r.game.updateMoves = true; r.game.updateKillTick = 2; r.game.directKillTick = 2; r.game.obstacles = {{110, 95, 105}};
+        auto f = makeFile({{100, 0, 1}, {150, 0, 0}});
+        G::VerifyJob j(&r.game, f, r.sim); runToEnd(j);
+        CHECK(j.done() && !j.ok() && j.failKind() == G::FailKind::Death && j.failTick() == 2);
+        CHECK(j.message().find("Killed by: object id 8") != std::string::npos);
+        CHECK(j.message().find("direct +2.0 (died at tick 2), update +2.0 (died at tick 2)") != std::string::npos);
+        CHECK(j.message().find("stepper:") != std::string::npos);
+        CHECK(j.message().find("Auto-repair moved click 1") != std::string::npos);   // the old text is still there
+    }
+    // T17: the other way round (processCommands dies, update runs): update is used, as before
+    {
+        Rig r; r.game.updateMoves = true; r.game.directKillTick = 2; r.game.obstacles = {{110, 95, 105}};
+        auto f = makeFile({{100, 0, 1}, {150, 0, 0}});
+        G::VerifyJob j(&r.game, f, r.sim); runToEnd(j);
+        CHECK(j.ok()); CHECK(G::State::get().stepMode == G::StepMode::Update);
+    }
+    // T18: both die, but one of them later: the one that lasts longer is used
+    {
+        Rig r; r.game.updateMoves = true; r.game.directKillTick = 2; r.game.updateKillTick = 5;
+        auto f = makeFile({{100, 0, 1}, {150, 0, 0}});
+        G::VerifyJob j(&r.game, f, r.sim); runToEnd(j);
+        CHECK(!j.ok() && j.failTick() == 5); CHECK(G::State::get().stepMode == G::StepMode::Update);
+    }
+    // T19: a REAL early death (spike at tick 40) is no reason to refuse a stepping way: the click at 36 saves the player, the check passes
+    {
+        Rig r; r.game.obstacles = {{40, 35, 38}};
+        auto f = makeFile({{36, 0, 1}, {60, 0, 0}});
+        G::VerifyJob j(&r.game, f, r.sim); runToEnd(j);
+        CHECK(j.ok()); CHECK(j.repairs().empty()); CHECK(G::State::get().stepMode == G::StepMode::Direct);
+    }
+    // T20: the game's own anti-cheat call (destroyPlayer with its spike) is not a death of the macro, in either way of stepping
+    {
+        Rig r; r.game.updateMoves = true; r.game.antiCheatTick = 2; r.game.obstacles = {{110, 95, 105}};
+        auto f = makeFile({{100, 0, 1}, {150, 0, 0}});
+        G::VerifyJob j(&r.game, f, r.sim); runToEnd(j);
+        CHECK(j.ok()); CHECK(j.repairs().empty());
+    }
+    // T21: simDestroyPlayer itself: the anti-cheat spike is told apart by the OBJECT (not by its id), another object or none is a death
+    {
+        Rig r; GameObject other; other.m_objectID = 8;
+        auto& S = G::State::get();
+        S.sim.clear();
+        G::simDestroyPlayer(&r.game, &r.game.p1, &r.game.acSpike);
+        CHECK(!S.sim.dead); CHECK(G::killerText().empty());
+        G::simDestroyPlayer(&r.game, &r.game.p1, &other);
+        CHECK(S.sim.dead); CHECK(S.sim.diedMask == 1); CHECK(G::killerText().find("object id 8") != std::string::npos);
+        S.sim.clear();
+        G::simDestroyPlayer(&r.game, &r.game.p1, nullptr);
+        CHECK(S.sim.dead); CHECK(G::killerText().find("no object at all") != std::string::npos);
+        S.sim.clear();
+        CHECK(G::isAnticheatSpike(&r.game, &r.game.acSpike)); CHECK(!G::isAnticheatSpike(&r.game, &other)); CHECK(!G::isAnticheatSpike(&r.game, nullptr));
     }
     std::printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

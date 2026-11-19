@@ -17,6 +17,7 @@ double nowMs() {
 // How long a verification run may last without reaching the end of the level (240 ticks = 1 second of level time).
 constexpr int kTailTicks = 240 * 120;          // normal limit: 2 minutes after the last click or after the recorded end
 constexpr int kHardCapTicks = 240 * 60 * 30;   // never more than 30 minutes of level time
+constexpr int kEarlyDeathTicks = 60;           // a death this early is a start-up problem of the replay, not a bad click: say how the game was stepped
 }  // namespace
 
 // ---------------------------------------------------------------------------------------------------
@@ -154,6 +155,11 @@ void VerifyJob::fail(FailKind kind, int tick, std::string why) {
 // (or ends) somewhere clearly later.
 void VerifyJob::onDeath(int t) {
     std::string why = "The player died at tick " + std::to_string(t) + ". The recording does not replay the same way.";
+    // v0.2.1: what killed the player, and (for a death in the first second) how the game was stepped. The same lines go to the Geode log.
+    std::string facts = killerText();
+    if (t <= kEarlyDeathTicks) facts += (facts.empty() ? "" : "\n") + simDiagnostics(m_pl, m_startX);
+    if (!m_candidate && !facts.empty()) log::info("GDFWR: death at tick {}: {}", t, facts);
+    if (!facts.empty()) why += "\n" + facts;
     if (!m_auto) return fail(FailKind::Death, t, why + (m_note.empty() ? "" : "\n" + m_note));
     if (m_candidate && t <= m_spotTick + gdfwr::repairSpotMargin(m_maxShift)) return nextCandidate();   // still the same trouble spot
     if (m_candidate) {   // the moved click got the run past the spot: keep the shift and go on with whatever kills the run now

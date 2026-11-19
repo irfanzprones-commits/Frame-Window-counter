@@ -25,8 +25,17 @@ inline constexpr int kTpsConfirmSteps = 12;   // consecutive steps of the wrong 
 struct SimFlags {
     bool active = false, dead = false, done = false;
     uint8_t diedMask = 0;
-    void begin() { active = true; dead = done = false; diedMask = 0; }
-    void clear() { dead = done = false; diedMask = 0; }
+    // v0.2.1: WHO called PlayLayer::destroyPlayer in our own run. Filled by the hook, read only for the failure report and the log
+    // (no decision depends on it, except the anti-cheat spike, which is not a hazard of the level and is ignored, see Hooks.cpp).
+    bool killerSeen = false, killerHasObject = false;
+    int killerId = 0;
+    float killerX = 0.f, killerY = 0.f, killedX = 0.f, killedY = 0.f;
+    void begin() { active = true; clear(); }
+    void clear() {
+        dead = done = false; diedMask = 0;
+        killerSeen = killerHasObject = false;
+        killerId = 0; killerX = killerY = killedX = killedY = 0.f;
+    }
     void end() { active = false; clear(); }
 };
 

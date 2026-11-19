@@ -47,9 +47,10 @@ std::vector<Event> finalRunEvents(const Macro& m) {
 }
 
 bool tickStepLooksNormal(double delta, double timeWarp, double step) {
-    auto near = [&](double want) { return std::fabs(delta - want) <= want * 2e-3 + 1e-9; };
-    if (near(step)) return true;
-    if (timeWarp > 0.01 && timeWarp < 100.0) return near(step * timeWarp) || near(step / timeWarp);
+    // (not called "near": that is a macro in <windows.h>)
+    auto closeTo = [&](double want) { return std::fabs(delta - want) <= want * 2e-3 + 1e-9; };
+    if (closeTo(step)) return true;
+    if (timeWarp > 0.01 && timeWarp < 100.0) return closeTo(step * timeWarp) || closeTo(step / timeWarp);
     return false;
 }
 
