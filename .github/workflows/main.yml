@@ -19,7 +19,7 @@ jobs:
       matrix:
         config:
           - name: Windows x64
-            os: windows-latest
+            os: windows-2022
             target: Win64
 
           - name: macOS
