@@ -27,3 +27,12 @@ endif()
 
 add_subdirectory($ENV{GEODE_SDK} ${CMAKE_CURRENT_BINARY_DIR}/geode)
 setup_geode_mod(${PROJECT_NAME})
+
+# Fix missing FMOD declarations in iOS generated bindings
+if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    if (TARGET GeodeBindings)
+        target_compile_options(GeodeBindings PRIVATE
+            -include fmod.hpp
+        )
+    endif()
+endif()
