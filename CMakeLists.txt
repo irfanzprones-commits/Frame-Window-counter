@@ -11,7 +11,7 @@ else()
 endif()
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 
-project(GDFWR VERSION 0.2.1)
+project(GDFWR VERSION 0.3.0)
 
 # core/ is plain C++ (no Geode); game/ and ui/ talk to the game.
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp)

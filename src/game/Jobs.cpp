@@ -21,22 +21,63 @@ constexpr int kEarlyDeathTicks = 60;           // a death this early is a start-
 }  // namespace
 
 // ---------------------------------------------------------------------------------------------------
-SimResult GameSimulator::run(SimRequest const& rq) {
+// One run of the game from tick `rq.startTick` (restored from a saved state), or, when `fromZero`, the same run started at the level start with
+// every earlier input replayed. Both end the same way: died, reached the end / the horizon alive, or (v0.3.0) converged with the verified run.
+SimResult GameSimulator::runOnce(SimRequest const& rq, bool fromZero) {
     SimResult out;
-    auto it = m_cps.find(rq.startTick);
-    if (it == m_cps.end()) { out.loaded = false; return out; }
     auto& S = State::get();
-    S.sim.clear();
-    m_pl->loadFromCheckpoint(it->second.data());                               // [BINDING] restore the saved state
-    m_pl->m_gameState.m_levelTime = double(rq.startTick) / 240.0;       // [BINDING] make sure the tick is exact
-    syncHold(m_pl, rq.holdAtStart);
+    int t0 = rq.startTick;
+    std::vector<gdfwr::SimInput> merged;
+    std::vector<gdfwr::SimInput> const* inputs = &rq.inputs;
+    if (fromZero) {
+        m_zeroRuns++;
+        t0 = 0;
+        merged.reserve(m_base.size() + rq.inputs.size());
+        for (auto const& in : m_base) if (in.tick < rq.startTick) merged.push_back(in);   // the inputs of the verified run before the saved state
+        merged.insert(merged.end(), rq.inputs.begin(), rq.inputs.end());
+        inputs = &merged;
+        m_pl->removeAllCheckpoints();
+        restartForSim(m_pl);                                       // level from the start; S.sim and the "level ended" flags are cleared
+        syncHold(m_pl, Hold{0, 0});
+    } else {
+        auto it = m_cps.find(rq.startTick);
+        if (it == m_cps.end()) { out.loaded = false; return out; }
+        S.sim.clear();
+        m_pl->loadFromCheckpoint(it->second.data());                       // [BINDING] restore the saved state
+        m_pl->m_gameState.m_levelTime = double(rq.startTick) / 240.0;       // [BINDING] make sure the tick is exact
+        syncHold(m_pl, rq.holdAtStart);
+    }
     size_t next = 0;
-    for (int t = rq.startTick; t <= rq.horizonTick; t++) {
-        if (rq.compareBaseline && m_baseline && size_t(t) < m_baseline->hashes.size() &&
-            stateHash(m_pl) != m_baseline->hashes[size_t(t)]) {         // 4.10: must match the recorded run
-            out.desync = true;
-            out.desyncTick = t;
-            return out;
+    int equalRun = 0;      // consecutive ticks whose state equals the verified run (v0.3.0 convergence)
+    constexpr int kConvergeTicks = 4;
+    for (int t = t0; t <= rq.horizonTick; t++) {
+        bool have = m_baseline && size_t(t) < m_baseline->hashes.size();
+        bool conv = rq.convergeAfter >= 0 && t >= rq.convergeAfter && !rq.compareBaseline;
+        if (have && (rq.compareBaseline || conv)) {
+            uint64_t h = stateHash(m_pl);
+            bool equal = h == m_baseline->hashes[size_t(t)];
+            if (rq.compareBaseline && !equal) {                           // 4.10: must match the recorded run
+                out.desync = true;
+                out.desyncTick = t;
+                return out;
+            }
+            // v0.3.0: from `convergeAfter` on (every input that differs from the verified run has been applied by then) a state that equals
+            // the verified run for a few ticks in a row IS the verified run from here on: the rest cannot go differently, so the run passes.
+            if (conv) {
+                equalRun = equal ? equalRun + 1 : 0;
+                if (equalRun >= kConvergeTicks) {
+                    out.converged = true;
+                    out.convergedTick = t;
+                    m_converged++;
+                    if (rq.driftTick > t && size_t(rq.driftTick) < m_baseline->samples.size()) {   // the verified run's state at the next click, drift 0
+                        auto const& s = m_baseline->samples[size_t(rq.driftTick)];
+                        out.driftValid = true;
+                        out.y = rq.driftPlayer == 0 ? s.y1 : s.y2;
+                        out.vy = rq.driftPlayer == 0 ? s.vy1 : s.vy2;
+                    }
+                    return out;
+                }
+            }
         }
         if (t == rq.driftTick) {                                          // 4.12: state at the start of the next real click
             auto s = sampleOf(m_pl);
@@ -44,8 +85,8 @@ SimResult GameSimulator::run(SimRequest const& rq) {
             out.y = rq.driftPlayer == 0 ? s.y1 : s.y2;
             out.vy = rq.driftPlayer == 0 ? s.vy1 : s.vy2;
         }
-        while (next < rq.inputs.size() && rq.inputs[next].tick <= t) {
-            auto const& in = rq.inputs[next++];
+        while (next < inputs->size() && (*inputs)[next].tick <= t) {
+            auto const& in = (*inputs)[next++];
             m_pl->handleButton(in.down, gdfwr::kJump, in.player == 0);
         }
         stepTick(m_pl);
@@ -53,6 +94,23 @@ SimResult GameSimulator::run(SimRequest const& rq) {
         if (S.sim.done || levelEndReason(m_pl, m_startX)) break;          // reached the end of the level alive
     }
     return out;
+}
+
+// v0.3.0: a saved state is TRUSTED once the offset-0 run from it (the one that must equal the verified run, tick for tick) has proved it.
+// When that run does not match, the state is not trusted any more and everything that would start from it starts at the level start
+// instead (what the verified run did, so it is exact; only slower). The old rule marked the click UNRELIABLE and measured nothing.
+SimResult GameSimulator::run(SimRequest const& rq) {
+    bool have = m_cps.count(rq.startTick) != 0;
+    if (have && !m_untrusted.count(rq.startTick)) {
+        SimResult r = runOnce(rq, false);
+        if (!rq.compareBaseline) return r;
+        if (r.loaded && !r.died && !r.desync) return r;                    // reproduces the verified run: trusted
+        if (m_untrusted.insert(rq.startTick).second) m_untrustedTotal++;
+        log::info("GDFWR: the saved state at tick {} does not reproduce the verified run ({}); clicks that start there are replayed from the level start",
+                  rq.startTick, r.desync ? "state differs at tick " + std::to_string(r.desyncTick) : (r.died ? "died at tick " + std::to_string(r.deathTick) : "not loaded"));
+    }
+    if (!m_haveBase) { SimResult r; r.loaded = false; return r; }
+    return runOnce(rq, true);
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -84,7 +142,10 @@ void GameLock::release(bool resetLevel) {
 
 // ---------------------------------------------------------------------------------------------------
 VerifyJob::VerifyJob(PlayLayer* pl, gdfwr::GdfwrFile file, GameSimulator& sim, bool autoRepair, int maxShift)
-    : m_pl(pl), m_file(file), m_sim(sim), m_auto(autoRepair), m_maxShift(std::clamp(maxShift, 1, 60)) {
+    : m_pl(pl), m_file(file), m_sim(sim), m_auto(autoRepair),
+      // v0.3.0: a click of a recording made at 14 FPS (17 ticks per frame) can be off by that much. The range is never smaller than the
+      // frame the recording could resolve, plus a little, whatever the setting says.
+      m_maxShift(std::clamp(std::max(maxShift, int(file.timing.clickResolution) > 1 ? int(file.timing.clickResolution) + 2 : 1), 1, 60)) {
     m_orig = file;
     m_accepted = file;
     // Is the silent simulation running at all? If the player does not move in any way of stepping, nothing below can work and
@@ -323,12 +384,18 @@ gdfwr::AnalysisInput makeAnalysisInput(PlayLayer* pl, gdfwr::GdfwrFile const& fi
     in.baselineSamples = baseline.samples;
     in.analyseUntilTick = analyseUntilTick;
     in.globalFlags = file.header.edit == gdfwr::EditStatus::Edited ? gdfwr::ClickFlag::Edited : 0;
-    // UNRELIABLE (recording) and RANDOM flags for the horizon of every click (Part 3 / 4.13)
+    // v0.3.0: the windows are measured by REPLAYING the level, so a flagged tick counter or input of the RECORDING no longer makes a click
+    // UNRELIABLE: the check of the macro (and the fit of its clicks) has already proved that the macro, as it is now, passes. Before, one such
+    // flag anywhere near a click made it "not counted", and a recording made at a low frame rate came out with no window at all.
+    // The old rule stays available (setting "Count clicks of a recording with a flagged tick counter" off).
     std::vector<std::pair<int, int>> bad;
-    for (auto const& sp : file.macro.finalRun.spans) {
-        auto const& sg = file.macro.segments[sp.segment];
-        if (sg.flags & (gdfwr::SegFlag::UnreliableInput | gdfwr::SegFlag::UnreliableTick)) bad.push_back({sp.fromTick, sp.toTick});
+    if (!Mod::get()->getSettingValue<bool>("count-untrusted-recording")) {
+        for (auto const& sp : file.macro.finalRun.spans) {
+            auto const& sg = file.macro.segments[sp.segment];
+            if (sg.flags & (gdfwr::SegFlag::UnreliableInput | gdfwr::SegFlag::UnreliableTick)) bad.push_back({sp.fromTick, sp.toTick});
+        }
     }
+    // RANDOM flags for the horizon of every click (Part 3 / 4.13)
     auto xs = randomTriggerXs(pl);
     in.regionFlags = [bad, xs, smp = baseline.samples](int from, int to, int player) -> uint32_t {
         uint32_t f = 0;
@@ -342,25 +409,39 @@ gdfwr::AnalysisInput makeAnalysisInput(PlayLayer* pl, gdfwr::GdfwrFile const& fi
     };
     return in;
 }
+// v0.3.0: tell the user when saved states could not be trusted (the clicks that start there were measured by replaying from the level start).
+void addSimWarnings(gdfwr::AnalysisData& d, GameSimulator const& sim) {
+    if (sim.untrustedTotal() <= 0) return;
+    d.warnings.push_back({"RESTORE_REPLAYED", std::to_string(sim.untrustedTotal()) + " saved state(s) did not restore exactly; " +
+                                                std::to_string(sim.zeroRuns()) + " run(s) started from tick 0"});
+}
+// Every input of the macro as the simulator replays it (same order and tie-break as the engine's own list).
+std::vector<gdfwr::SimInput> baseInputsOf(gdfwr::AnalysisInput const& in) {
+    std::vector<gdfwr::SimInput> v;
+    v.reserve(in.actions.size());
+    for (auto const& a : in.actions) v.push_back({a.tick, a.player, a.press, a.seq});
+    return v;
+}
 // The settings that decide how the clicks are measured. `reach` must equal the one the saved states were planned for.
 gdfwr::AnalysisParams makeAnalysisParams(std::vector<int> selectedClicks) {
     gdfwr::AnalysisParams p;
-    p.fullScanTop = 20;
+    p.fullScanTop = int(Mod::get()->getSettingValue<int64_t>("full-scan-top"));   // v0.3.0: default 0 (was 20): the second, tick-by-tick pass is optional
     p.selectedClicks = std::move(selectedClicks);
     p.reach = std::max(gdfwr::kOffsetCap, int(Mod::get()->getSettingValue<int64_t>("search-reach")));
     p.wholeClick = Mod::get()->getSettingValue<bool>("whole-click-window");
     p.subTick = false;  // sub-tick shifts need a simulator that can start an input between two steps (GameSimulator cannot yet)
-    p.detectConvergence = false;  // exact horizon rule only; early-out on equal state is optional (4.5)
+    p.detectConvergence = Mod::get()->getSettingValue<bool>("fast-converge");   // v0.3.0: a run that is back on the verified run stops there
     return p;
 }
 }  // namespace
 
 AnalyzeJob::AnalyzeJob(PlayLayer* pl, gdfwr::GdfwrFile file, GameSimulator& sim, gdfwr::Baseline const& baseline,
                        int analyseUntilTick, std::vector<int> selectedClicks)
-    : m_pl(pl), m_file(std::move(file)) {
+    : m_pl(pl), m_sim(&sim), m_file(std::move(file)) {
     sim.setBaseline(&baseline);
-    m_engine = std::make_unique<gdfwr::AnalysisEngine>(makeAnalysisInput(pl, m_file, baseline, analyseUntilTick),
-                                                       makeAnalysisParams(std::move(selectedClicks)), sim);
+    auto input = makeAnalysisInput(pl, m_file, baseline, analyseUntilTick);
+    sim.setBaseInputs(baseInputsOf(input));
+    m_engine = std::make_unique<gdfwr::AnalysisEngine>(std::move(input), makeAnalysisParams(std::move(selectedClicks)), sim);
     State::get().sim.clear();
 }
 
@@ -372,6 +453,7 @@ void AnalyzeJob::store() {
     d.macroHash = m_file.macro.macroHash;
     d.stale = false;
     for (auto const& w : m_file.header.warnings) d.warnings.push_back(w);   // COARSE_INPUT, RANDOM_UNCAPTURED ...
+    if (m_sim) addSimWarnings(d, *m_sim);
     m_file.analysis = std::move(d);
 }
 
@@ -395,6 +477,7 @@ StreamedAnalyzeJob::StreamedAnalyzeJob(PlayLayer* pl, gdfwr::GdfwrFile file, Gam
     : m_pl(pl), m_file(std::move(file)), m_sim(sim), m_baseline(&baseline), m_until(analyseUntilTick) {
     sim.setBaseline(&baseline);
     m_in = makeAnalysisInput(pl, m_file, baseline, analyseUntilTick);
+    sim.setBaseInputs(baseInputsOf(m_in));
     m_par = makeAnalysisParams({});
     m_events = gdfwr::finalRunEvents(m_file.macro);
     m_chunks = gdfwr::planChunks(m_in.actions, m_par.cap, m_par.reach, size_t(std::max<int64_t>(8, Mod::get()->getSettingValue<int64_t>("max-checkpoints"))),
@@ -544,6 +627,7 @@ void StreamedAnalyzeJob::store() {
     d.stale = false;
     d.warnings.clear();
     for (auto const& w : m_file.header.warnings) d.warnings.push_back(w);   // COARSE_INPUT, RANDOM_UNCAPTURED ...
+    addSimWarnings(d, m_sim);
     if (d.clicks.empty()) { d.specVersion = std::string(gdfwr::kAnalysisSpec); d.cap = m_par.cap; d.reach = m_par.reach; d.wholeClick = m_par.wholeClick; }
     m_file.analysis = std::move(d);
 }

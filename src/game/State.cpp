@@ -41,6 +41,7 @@ std::string describeCode(std::string const& c) {
         {"LEVEL_CHANGED", "The level data changed since the file was made. Analyze again."},
         {"DERIVED_DROPPED", "A damaged derived section (baseline or analysis) was dropped."},
         {"TPS_CHANGED", "The step length looked different for a while during the recording (TPS bypass or a game slowdown?). Analysis still runs: if the macro was not recorded at 240 TPS, the check at the start of Analyze fails and says so."},
+        {"RESTORE_REPLAYED", "The game did not restore some saved states exactly, so the clicks that start there were measured by replaying the level from the start (slower, still exact)."},
         {"UNRELIABLE_INPUT", "An input event may have been missed in a segment."},
         {"UNRELIABLE_TICK", "The tick counter was not trustworthy in a segment."},
         {"INVALID_SEQUENCE", "Press and release do not alternate. Fix it first."},

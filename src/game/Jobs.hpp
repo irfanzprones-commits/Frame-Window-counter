@@ -16,16 +16,30 @@ class GameSimulator final : public gdfwr::ISimulator {
 public:
     explicit GameSimulator(PlayLayer* pl) : m_pl(pl) {}
     void keep(int tick, CheckpointObject* cp) { m_cps[tick] = cp; }
-    void clear() { m_cps.clear(); }                 // a new verification run starts: the old saved states do not belong to it
+    void clear() { m_cps.clear(); m_untrusted.clear(); }   // a new verification run starts: the old saved states (and what was learned about them) do not belong to it
     size_t count() const { return m_cps.size(); }
     void setStartX(float x) { m_startX = x; }       // where player 1 starts (for the end-portal rule, see levelEndReason)
     void setBaseline(gdfwr::Baseline const* b) { m_baseline = b; }
+    // v0.3.0: every input of the macro, in order. With it a run that cannot start from a saved state (the state is missing, or restoring it
+    // does not reproduce the verified run) is replayed from the level start instead: slower, but exact. Without it that run is refused.
+    void setBaseInputs(std::vector<gdfwr::SimInput> v) { m_base = std::move(v); m_haveBase = true; }
+    // Statistics for the report: saved states that could not be trusted, and runs that had to start from tick 0 because of that.
+    int untrustedStates() const { return int(m_untrusted.size()); }
+    int untrustedTotal() const { return m_untrustedTotal; }   // over the whole analysis (clear() does not reset it)
+    std::set<int> const& untrustedTicks() const { return m_untrusted; }
+    int zeroRuns() const { return m_zeroRuns; }
+    int convergedRuns() const { return m_converged; }
     gdfwr::SimResult run(gdfwr::SimRequest const& rq) override;
 private:
+    gdfwr::SimResult runOnce(gdfwr::SimRequest const& rq, bool fromZero);
     PlayLayer* m_pl;
     std::map<int, geode::Ref<CheckpointObject>> m_cps;
     gdfwr::Baseline const* m_baseline = nullptr;
     float m_startX = 0.f;
+    std::vector<gdfwr::SimInput> m_base;
+    bool m_haveBase = false;
+    std::set<int> m_untrusted;     // ticks of saved states whose restore did not reproduce the verified run
+    int m_zeroRuns = 0, m_converged = 0, m_untrustedTotal = 0;
 };
 
 // Takes the game over for a job (one lock per verify/analyze flow): stops its own update loop, marks our hooks as "simulation", restores everything at the end.
@@ -120,6 +134,7 @@ public:
 private:
     void store();
     PlayLayer* m_pl;
+    GameSimulator* m_sim = nullptr;
     gdfwr::GdfwrFile m_file;
     std::unique_ptr<gdfwr::AnalysisEngine> m_engine;
     bool m_stored = false;

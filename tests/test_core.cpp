@@ -503,6 +503,14 @@ TEST(replay_buckets_and_precision) {
     { GdfwrFile n = fileFromActions({}, 100); CHECK(!buildReplayPlan(n).ok); }                                                              // empty macro: no replay
     GdfwrFile g = richFile(); g.analysis->clicks[0].flags |= ClickFlag::Unreliable;
     CHECK(!buildReplayPlan(g).rings[0].known);                                                    // grey ring, not counted
+    { GdfwrFile n = richFile(); n.analysis->clicks[0].out.releaseInsensitive = true;              // v0.3.0: measured, but the release never mattered
+      auto q = buildReplayPlan(n); CHECK(!q.rings[1].known); CHECK(q.rings[1].insensitive); CHECK(!q.rings[0].insensitive); CHECK(q.rings[0].known); }
+    // ring life (v0.3.0): full strength at once (no growing), fully visible for `hold`, then a linear fade over `fade`, then gone
+    CHECK(ringOpacity(0.f, 1.f, 2.f) == 1.f); CHECK(ringOpacity(1.f, 1.f, 2.f) == 1.f); CHECK(ringOpacity(-1.f, 1.f, 2.f) == 1.f);
+    CHECK(std::abs(ringOpacity(2.f, 1.f, 2.f) - 0.5f) < 1e-6f); CHECK(ringOpacity(3.f, 1.f, 2.f) == 0.f); CHECK(ringOpacity(99.f, 1.f, 2.f) == 0.f);
+    CHECK(ringOpacity(1.5f, 1.f, 0.f) == 0.f);
+    { bool mono = true; for (float t = 0.f; t < 3.5f; t += 0.01f) mono = mono && ringOpacity(t, 1.f, 2.f) >= ringOpacity(t + 0.01f, 1.f, 2.f); CHECK(mono); }
+    CHECK(kRingHoldDefault + kRingFadeDefault >= 5.f * 0.6f);                                      // the old ring was gone after 0.6 s
     std::vector<int> tight(100, 1), wide(100, 12);
     double a = rawPrecision24h(tight, 14400), b = rawPrecision24h(wide, 14400);
     CHECK(a > b); CHECK(b > 0); CHECK(rawPrecision24h(std::vector<int>{}, 100) == 0.0);
@@ -529,9 +537,10 @@ TEST(repair_culprit_and_shifts) {
     GdfwrFile two = fileFromActions({{100, 0, 1}, {120, 1, 1}, {150, 0, 0}, {160, 1, 0}}, 300);   // players are independent
     c = culpritClicks(two.macro, 155); CHECK(!c.empty() && c[0].player == 0 && c[0].index == 0);   // the last edge <= 155 is player 0's release at 150
     c = culpritClicks(two.macro, 165); CHECK(!c.empty() && c[0].player == 1 && c[0].index == 0);
-    CHECK((repairShiftOrder(3) == std::vector<int>{1, 2, 3, -1, -2, -3}));                          // later first, then earlier
+    CHECK((repairShiftOrder(3) == std::vector<int>{1, -1, 2, -2, 3, -3}));                          // v0.3.0: the smallest correction first, later before earlier on a tie
     CHECK(repairShiftOrder(0).empty());
-    CHECK_EQ(repairShiftOrder(10).size(), size_t(20)); CHECK_EQ(repairShiftOrder(10)[10], -1);
+    CHECK_EQ(repairShiftOrder(10).size(), size_t(20)); CHECK_EQ(repairShiftOrder(10)[1], -1); CHECK_EQ(repairShiftOrder(10)[19], -10);
+    CHECK(kRepairMaxClicks >= 100);                                                                  // v0.3.0: a coarse recording may need a fit at every click
     CHECK_EQ(repairSpotMargin(10), 32);
 }
 TEST(repair_shift_click) {

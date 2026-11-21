@@ -61,8 +61,9 @@ std::vector<RepairClick> culpritClicks(const Macro& m, int failTick) {
 std::vector<int> repairShiftOrder(int maxShift) {
     std::vector<int> v;
     maxShift = std::max(0, maxShift);
-    for (int d = 1; d <= maxShift; d++) v.push_back(d);
-    for (int d = 1; d <= maxShift; d++) v.push_back(-d);
+    // v0.3.0: by size of the correction, later before earlier on a tie (+1, -1, +2, -2 ...). Before, every later shift was tried before the first
+    // earlier one, so a click that was 1 tick too LATE could be "repaired" by moving it 9 ticks later by accident.
+    for (int d = 1; d <= maxShift; d++) { v.push_back(d); v.push_back(-d); }
     return v;
 }
 

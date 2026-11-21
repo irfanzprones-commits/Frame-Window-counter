@@ -1,6 +1,9 @@
 #include "Overlays.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <map>
 
 #include "game/State.hpp"
 
@@ -107,38 +110,57 @@ void ReplayHud::onAction(PlayLayer* pl, gdfwr::ReplayRing const& ring, CCPoint w
         m_windows.push_back(ring.width);
         this->refreshText();
     }
-    uint32_t colour = ring.known ? gdfwr::replayBucketColor(ring.bucket) : 0x888888;
-    auto node = CCNode::create();
-    node->setPosition(where);
-    auto draw = CCDrawNode::create();
+    m_hold = std::max(0.f, float(Mod::get()->getSettingValue<double>("ring-hold")));
+    m_fade = std::max(0.05f, float(Mod::get()->getSettingValue<double>("ring-fade")));
+    Ring r;
+    r.colour = ring.known ? gdfwr::replayBucketColor(ring.bucket) : 0x888888;
+    // "?" = this click could not be measured; "any" = measured, but the release never mattered (nothing to count)
+    std::string txt = ring.known ? std::to_string(ring.window) + (ring.plus ? "+" : "") : (ring.insensitive ? "any" : "?");
+    r.node = CCNode::create();
+    // v0.3.0: the ring is drawn where the player was ON THE SCREEN when the click happened and stays there while it fades. (Before, it was
+    // fixed in the level and scrolled out of the screen within a second, and a ring that was still alive when the replay stopped stayed in the
+    // level for good.)
+    CCPoint screen = pl->m_objectLayer->convertToWorldSpace(where);
+    r.node->setPosition(this->convertToNodeSpace(screen));
+    r.text = label(txt.c_str(), "bigFont.fnt", 0.33f, {0.5f, 0.5f});
+    r.text->setColor(rgb(r.colour));
+    r.node->addChild(r.text, 1);
+    this->addChild(r.node.data(), 10);
+    this->paintRing(r, 1.f);
+    m_rings.push_back(std::move(r));
+}
+// The circle is drawn again with the opacity it has now (a CCDrawNode has no opacity of its own).
+void ReplayHud::paintRing(Ring& r, float opacity) {
+    float a = std::clamp(opacity, 0.f, 1.f);
+    if (r.draw) r.draw->removeFromParent();
+    r.draw = CCDrawNode::create();
     constexpr int N = 28;
     CCPoint v[N];
     for (int i = 0; i < N; i++) {
-        float a = float(i) * 6.2831853f / float(N);
-        v[i] = CCPoint(std::cos(a) * 15.f, std::sin(a) * 15.f);   // not {..}: CCPoint::operator= is ambiguous with CCSize
+        float t = float(i) * 6.2831853f / float(N);
+        v[i] = CCPoint(std::cos(t) * 15.f, std::sin(t) * 15.f);   // not {..}: CCPoint::operator= is ambiguous with CCSize
     }
-    ccColor4F c{float(colour >> 16 & 255) / 255.f, float(colour >> 8 & 255) / 255.f, float(colour & 255) / 255.f, 1.f};
-    draw->drawPolygon(v, N, ccColor4F{0.f, 0.f, 0.f, 0.f}, 1.6f, c);
-    node->addChild(draw);
-    std::string txt = ring.known ? std::to_string(ring.window) + (ring.plus ? "+" : "") : "?";
-    auto l = label(txt.c_str(), "bigFont.fnt", 0.33f, {0.5f, 0.5f});
-    l->setColor(rgb(colour));
-    node->addChild(l);
-    pl->m_objectLayer->addChild(node, 1000);
-    m_rings.push_back({node, 0.f});
+    float cr = float(r.colour >> 16 & 255) / 255.f, cg = float(r.colour >> 8 & 255) / 255.f, cb = float(r.colour & 255) / 255.f;
+    // the colour is premultiplied by the opacity: that is how the draw node blends
+    r.draw->drawPolygon(v, N, ccColor4F{0.f, 0.f, 0.f, 0.f}, 1.6f, ccColor4F{cr * a, cg * a, cb * a, a});
+    r.node->addChild(r.draw, 0);
+    r.text->setOpacity(uint8_t(a * 255.f));
+    r.shown = a;
 }
 void ReplayHud::clear() {
-    for (auto& r : m_rings) if (r.first) r.first->removeFromParent();
+    for (auto& r : m_rings) if (r.node) r.node->removeFromParent();
     m_rings.clear();
 }
+// No growing, no sudden end: full strength at once, a steady hold, then a slow fade (ringOpacity in core/Metrics).
 void ReplayHud::update(float dt) {
     for (auto& r : m_rings) {
-        r.second += dt;
-        r.first->setScale(1.f + 0.6f * std::min(1.f, r.second / 0.6f));
+        r.age += dt;
+        float a = gdfwr::ringOpacity(r.age, m_hold, m_fade);
+        if (a != r.shown) this->paintRing(r, a);
     }
-    std::erase_if(m_rings, [](auto& r) {
-        if (r.second < 0.6f) return false;
-        r.first->removeFromParent();
+    std::erase_if(m_rings, [&](Ring& r) {
+        if (gdfwr::ringOpacity(r.age, m_hold, m_fade) > 0.f) return false;
+        r.node->removeFromParent();
         return true;
     });
 }
@@ -171,7 +193,10 @@ bool ProgressPopup::init(std::string const& title, Hooks h) {
 void ProgressPopup::tick(float dt) {
     if (m_finished) return;
     m_elapsed += dt;
-    bool fin = m_h.pump(8.0);  // a few ms of work per frame keeps the game responsive
+    // v0.3.0: about half of the last frame, between 8 and 40 ms. A fixed 8 ms left the analysis a tenth of the time at 14 FPS (70 ms per
+    // frame); the bar and the text still update every frame, and the game stays as responsive as it is at that frame rate.
+    double budget = std::clamp(double(dt) * 500.0, 8.0, 40.0);
+    bool fin = m_h.pump(budget);
     float p = std::clamp(m_h.progress ? m_h.progress() : 0.f, 0.f, 1.f);
     m_bar->setContentSize({std::max(1.f, m_barW * p), m_bar->getContentSize().height});
     std::string s = m_h.status ? m_h.status() : "";
@@ -248,7 +273,34 @@ bool ResultPopup::init(gdfwr::GdfwrFile const& f) {
         for (auto i : v) s += " #" + std::to_string(i + 1) + (cluster ? "" : "");
         return v.empty() ? std::string(" none") : s;
     };
-    char b[200];
+    char b[220];
+    // a long explanation goes on several rows instead of running off the screen
+    auto addWrapped = [&](std::string s, size_t width = 150) {
+        while (s.size() > width) {
+            size_t cut = s.rfind(' ', width);
+            if (cut == std::string::npos || cut < width / 2) cut = width;
+            rows.push_back(s.substr(0, cut));
+            s = "   " + s.substr(cut + (s[cut] == ' ' ? 1 : 0));
+        }
+        rows.push_back(s);
+    };
+    // v0.3.0: the recorded ticks next to the ticks the clicks have now (the replay fits a click that does not pass to the game's own timing).
+    // key: {player, click index inside the player's stream} -> {recorded press, press, recorded release, release}
+    std::map<std::pair<int, int>, std::array<int, 4>> ticks;
+    {
+        auto evs = gdfwr::finalRunEvents(f.macro);
+        std::map<uint32_t, gdfwr::Event const*> bySeq;
+        for (auto const& e : evs) bySeq[e.seq] = &e;
+        int idx[2] = {0, 0};
+        for (auto const& e : evs) {
+            if (e.type != gdfwr::EventType::Press) continue;
+            int p = e.player ? 1 : 0;
+            auto rel = bySeq.find(uint32_t(e.partner));
+            int recRel = -1, rel2 = -1;
+            if (e.partner >= 0 && rel != bySeq.end()) { recRel = rel->second->tick; rel2 = rel->second->editedTick; }
+            ticks[{p, idx[p]++}] = {e.tick, e.editedTick, recRel, rel2};
+        }
+    }
     auto tightest = [&](std::vector<uint32_t> const& v, bool inWin, bool cl) {
         if (v.empty()) return std::string("none");
         auto const& w0 = cl ? a.clusters[v[0]].win : (inWin ? a.clicks[v[0]].in : a.clicks[v[0]].out);
@@ -266,12 +318,49 @@ bool ResultPopup::init(gdfwr::GdfwrFile const& f) {
     std::snprintf(b, sizeof b, "1:%d  2:%d  3:%d  4:%d  5-6:%d  7-10:%d  11-24:%d  25+:%d  N+:%d  CLAMP:%d  UNRELIABLE:%d  RANDOM:%d  NOT_ANALYSED:%d",
                   k.b1, k.b2, k.b3, k.b4, k.b5_6, k.b7_10, k.b11_24, k.b25p, k.nPlus, k.clamp, k.unreliable, k.random, k.notAnalysed);
     rows.push_back(b);
-    for (auto const& wr : a.warnings) rows.push_back("! " + game::describeCode(wr.code));
+    if (a.summary.reliableClicks == 0 && !a.clicks.empty())
+        addWrapped("NOTHING WAS COUNTED: clicks marked UNRELIABLE, RANDOM or NOT_ANALYSED are never counted (flags at the end of each click below).");
+    else if (k.unreliable + k.random + k.notAnalysed > 0) {
+        std::snprintf(b, sizeof b, "%d of %zu clicks were counted; %d are marked UNRELIABLE / RANDOM / NOT_ANALYSED (flags at the end of each click below).",
+                      a.summary.reliableClicks, a.clicks.size(), k.unreliable + k.random + k.notAnalysed);
+        addWrapped(b);
+    }
+    for (auto const& wr : a.warnings)
+        addWrapped("! " + game::describeCode(wr.code) + (wr.code == "RESTORE_REPLAYED" && !wr.detail.empty() ? " (" + wr.detail + ")" : std::string()));
+    {   // the clicks the fit moved
+        std::vector<std::string> moved;
+        for (auto const& c : a.clicks) {
+            auto it = ticks.find({int(c.player), int(c.index)});
+            if (it == ticks.end() || (it->second[0] == it->second[1] && it->second[2] == it->second[3])) continue;
+            auto const& t = it->second;
+            std::snprintf(b, sizeof b, "   #%u  P%d  press %d -> %d (%+d)", c.index + 1, c.player + 1, t[0], t[1], t[1] - t[0]);
+            std::string s = b;
+            if (t[2] >= 0 && t[2] != t[3]) { std::snprintf(b, sizeof b, "   release %d -> %d (%+d)", t[2], t[3], t[3] - t[2]); s += b; }
+            moved.push_back(s);
+        }
+        if (!moved.empty()) {
+            addWrapped("The clicks were fitted to the game's timing (the game did not pass the recorded ticks):");
+            for (auto& m : moved) rows.push_back(m);
+            addWrapped("   Edit clicks > Restore all brings the recorded ticks back. The windows below are around the ticks the clicks have NOW.");
+        }
+    }
+    if (f.timing.clickResolution > 1) {
+        std::snprintf(b, sizeof b, "This recording is only exact to %d ticks per click (one frame at about %d FPS, no click-between-frames), so a recorded tick can be up to that far from the tick the game used.",
+                      int(f.timing.clickResolution), int(std::lround(240.0 / double(f.timing.clickResolution))));
+        addWrapped(b);
+    }
+    if (!a.warnings.empty() && a.summary.reliableClicks > 0)
+        addWrapped("The recording warnings above do not change these numbers: every window was measured by replaying the level.");
     rows.push_back("");
     for (size_t i = 0; i < a.clicks.size(); i++) {
         auto const& c = a.clicks[i];
-        std::snprintf(b, sizeof b, "#%zu  P%d  ticks %d-%d   %s %s   RELEASE %s%s", i + 1, c.player + 1, c.press, c.release, a.wholeClick ? "CLICK" : "PRESS",
-                      windowText(c.in).c_str(), windowText(c.out).c_str(), flagsText(c.flags).c_str());
+        std::string rec;
+        if (auto it = ticks.find({int(c.player), int(c.index)}); it != ticks.end() && (it->second[0] != c.press || (it->second[2] >= 0 && it->second[2] != c.release))) {
+            std::snprintf(b, sizeof b, " (recorded %d-%d)", it->second[0], it->second[2]);
+            rec = b;
+        }
+        std::snprintf(b, sizeof b, "#%zu  P%d  ticks %d-%d%s   %s %s   RELEASE %s%s", i + 1, c.player + 1, c.press, c.release, rec.c_str(),
+                      a.wholeClick ? "CLICK" : "PRESS", windowText(c.in).c_str(), windowText(c.out).c_str(), flagsText(c.flags).c_str());
         rows.push_back(b);
         for (auto const* wr : {&c.in, &c.out})
             if (wr->fullScan) {

@@ -17,6 +17,7 @@ struct ReplayRing {
     uint8_t player = 0;
     bool press = true;
     bool known = false;       // false: UNRELIABLE / RANDOM / NOT_ANALYSED / N/A -> grey ring "?", not counted
+    bool insensitive = false; // v0.3.0: a release whose timing never changed anything: grey ring "any" (measured, but nothing to count)
     bool plus = false;        // value is a lower bound (N+ or CLAMP): shown as "N+"
     int window = 0;           // whole-tick count at the recorded alignment, 1..99
     double width = 0;         // continuous width in ticks (middle of the known range); equals `window` with whole-tick runs
@@ -34,6 +35,11 @@ struct ReplayPlan {
 // section; it must be CURRENT and the file VERIFIED, otherwise every ring is grey and nothing is counted.
 // Action 2i-1 of a player stream = press window of click i, action 2i = its release window (Part 5, step 5; v2: each edge on its own).
 ReplayPlan buildReplayPlan(const GdfwrFile& f);
+
+// v0.3.0 ring life: a ring appears at full strength at once (no growing, no animation), stays fully visible for `hold` seconds and then
+// fades out linearly over `fade` seconds. Returns the opacity 0..1; 0 means "remove the ring".
+inline constexpr float kRingHoldDefault = 1.0f, kRingFadeDefault = 2.0f;
+float ringOpacity(float age, float hold, float fade);
 
 // "Raw Precision (24h) in sigma/s". PROVISIONAL: the model is my reading from Appendix A item 5 and is
 // not confirmed by the owner. windows = N_i of every counted action; levelTicks = length of one attempt.

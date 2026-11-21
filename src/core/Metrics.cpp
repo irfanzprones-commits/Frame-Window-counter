@@ -50,9 +50,9 @@ ReplayPlan buildReplayPlan(const GdfwrFile& f) {
         if (it != byClick.end()) {
             const ClickResult& c = *it->second;
             const WindowResult& w = (a % 2 == 0) ? c.in : c.out;
-            bool bad = (c.flags & (ClickFlag::Unreliable | ClickFlag::Random | ClickFlag::NotAnalysed)) || !w.analysed ||
-                       w.na || w.releaseInsensitive;
-            if (!bad) {
+            bool bad = (c.flags & (ClickFlag::Unreliable | ClickFlag::Random | ClickFlag::NotAnalysed)) || !w.analysed || w.na;
+            if (!bad && w.releaseInsensitive) r.insensitive = true;   // measured: this release never mattered (not a window to count)
+            else if (!bad) {
                 r.known = true;
                 r.plus = w.lowerBound();
                 r.window = std::clamp(w.window(), 1, 99);
@@ -95,6 +95,15 @@ std::string formatPrecision(double v) {
     char b[48];
     std::snprintf(b, sizeof b, "%.2f", v);
     return b;
+}
+
+// A ring is fully visible for `hold` seconds, then fades out linearly over `fade` seconds (v0.3.0: no scale animation, no sudden removal).
+float ringOpacity(float age, float hold, float fade) {
+    if (age < 0.f) age = 0.f;
+    if (age <= hold) return 1.f;
+    if (fade <= 0.f) return 0.f;
+    float a = 1.f - (age - hold) / fade;
+    return a > 0.f ? a : 0.f;
 }
 
 }  // namespace gdfwr

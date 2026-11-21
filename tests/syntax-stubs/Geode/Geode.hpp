@@ -37,7 +37,10 @@ public:
     float m_px = 0, m_py = 0;                  // stored so that tests/verify_sim_test.cpp can build a fake game
     void setPosition(CCPoint p) { m_px = p.x; m_py = p.y; }
     void setPositionX(float v) { m_px = v; }
+    void setPositionY(float v) { m_py = v; }
     CCPoint getPosition() { return {m_px, m_py}; }
+    CCPoint convertToWorldSpace(CCPoint const& p) { return p; }   // the real ones: cocos2d-x CCNode
+    CCPoint convertToNodeSpace(CCPoint const& p) { return p; }
     float getPositionX() { return m_px; }
     float getPositionY() { return m_py; }
     float getRotation() { return 0; }
@@ -101,11 +104,21 @@ public:
     static Mod* get() { static Mod m; return &m; }
     // Tests can change a number setting through stubInts(); the defaults are the ones of mod.json.
     static std::map<std::string, int64_t>& stubInts() {
-        static std::map<std::string, int64_t> m{{"max-checkpoints", 3000}, {"search-reach", 12}, {"repair-max-shift", 10}};
+        static std::map<std::string, int64_t> m{{"max-checkpoints", 3000}, {"search-reach", 12}, {"repair-max-shift", 10}, {"full-scan-top", 0}};
+        return m;
+    }
+    static std::map<std::string, bool>& stubBools() {   // v0.3.0: the defaults of mod.json (a setting that is not listed is false)
+        static std::map<std::string, bool> m{{"count-untrusted-recording", true}, {"fast-converge", true}};
+        return m;
+    }
+    static std::map<std::string, double>& stubDoubles() {
+        static std::map<std::string, double> m{{"ring-hold", 1.0}, {"ring-fade", 2.0}};
         return m;
     }
     template <class T> T getSettingValue(std::string const& key) {
         if constexpr (std::is_same_v<T, int64_t>) { auto it = stubInts().find(key); return it != stubInts().end() ? it->second : 3000; }
+        else if constexpr (std::is_same_v<T, bool>) { auto it = stubBools().find(key); return it != stubBools().end() ? it->second : false; }
+        else if constexpr (std::is_same_v<T, double>) { auto it = stubDoubles().find(key); return it != stubDoubles().end() ? it->second : 0.0; }
         else return T{};
     }
     std::filesystem::path getSaveDir() { return {}; }

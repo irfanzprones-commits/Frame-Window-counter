@@ -31,10 +31,21 @@ public:
     void clear();
     void update(float dt) override;
 private:
+    // v0.3.0: a ring is a child of THIS node (screen space), so it can never stay behind in the level when the replay stops or the level restarts.
+    struct Ring {
+        geode::Ref<cocos2d::CCNode> node;
+        cocos2d::CCDrawNode* draw = nullptr;
+        cocos2d::CCLabelBMFont* text = nullptr;
+        uint32_t colour = 0;
+        float age = 0.f;
+        float shown = -1.f;   // the opacity it was last drawn with
+    };
     void refreshText();
+    void paintRing(Ring& r, float opacity);
     std::array<cocos2d::CCLabelBMFont*, gdfwr::kReplayBucketCount> m_lines{};
     std::array<int, gdfwr::kReplayBucketCount> m_count{};
-    std::vector<std::pair<geode::Ref<cocos2d::CCNode>, float>> m_rings;
+    std::vector<Ring> m_rings;
+    float m_hold = gdfwr::kRingHoldDefault, m_fade = gdfwr::kRingFadeDefault;
     std::vector<double> m_windows;   // continuous widths (ticks) of the counted actions
     cocos2d::CCLabelBMFont* m_precision = nullptr;
     int m_levelTicks = 0;

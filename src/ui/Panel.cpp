@@ -171,7 +171,6 @@ struct Flow {
     bool streamed = false;
     gdfwr::Baseline partial;  // after a failed verification (for "Continue")
     gdfwr::Baseline kept;     // baseline the analysis compares against
-    std::string repairNote;   // which clicks the auto-repair moved (shown after the analysis, on top of the result)
 };
 
 void endFlow(std::shared_ptr<Flow> f) {
@@ -204,8 +203,7 @@ void startAnalyze(std::shared_ptr<Flow> f, int until) {
         S().file = f->job->file();
         S().dirty = true;
         endFlow(f);
-        if (S().file->analysis) ResultPopup::create(*S().file)->show();
-        if (!f->repairNote.empty()) G::alertBox("Macro repaired", f->repairNote);
+        if (S().file->analysis) ResultPopup::create(*S().file)->show();   // v0.3.0: it also lists the clicks the fit moved
     };
     ProgressPopup::create("Analyze 2/2: measuring the clicks", std::move(h))->show();
 }
@@ -227,7 +225,6 @@ void startAnalyzeStreamed(std::shared_ptr<Flow> f, int until) {
         endFlow(f);
         if (S().file->analysis) ResultPopup::create(*S().file)->show();
         if (failed) G::alertBox("Analysis stopped", why);
-        if (!f->repairNote.empty()) G::alertBox("Macro repaired", f->repairNote);
     };
     ProgressPopup::create("Analyze 2/2: measuring the clicks (in parts)", std::move(h))->show();
 }
@@ -249,12 +246,10 @@ void onVerifyDone(std::shared_ptr<Flow> f) {
         f->kept = *S().file->baseline;
         refreshPanel();
         if (!v.repairs().empty()) {
-            // The macro did not pass as it was; the auto-repair moved clicks until it did. Say exactly what changed.
-            std::string t = "The macro did not pass as recorded. These clicks were moved until it reached the end of the level:\n";
-            for (auto const& r : v.repairs()) t += "- " + r + "\n";
-            t += "\nThe file is now EDITED. Edit clicks > Restore all brings the original timing back.";
-            G::notify("Macro repaired: " + std::to_string(v.repairs().size()) + " click(s) moved");
-            f->repairNote = t;
+            // v0.3.0: the macro did not pass at the recorded ticks (a recording made at a low frame rate is only exact to a frame), so the
+            // replay fitted the clicks to the game's own timing. No dialog to click away: the result screen lists every moved click
+            // (recorded -> now), and Edit clicks > Restore all brings the recorded ticks back.
+            G::notify("Fitted " + std::to_string(v.repairs().size()) + " click(s) to the game's timing: see the result");
         }
         return startAnalyzeAuto(f, INT_MAX);  // the macro replays to the end of the level: now measure it
     }
@@ -290,7 +285,7 @@ void startVerify(std::shared_ptr<Flow> f) {
     h.progress = [f]() { return f->verify->progress(); };
     h.cancel = [f]() { f->verify->cancel(); };
     h.done = [f]() { onVerifyDone(f); };
-    ProgressPopup::create("Analyze 1/2: checking the macro", std::move(h))->show();
+    ProgressPopup::create("Analyze 1/2: replaying the macro (and fitting its clicks)", std::move(h))->show();
 }
 
 // Why Analyze is not possible right now (empty = it is). One place for the button state and for the "Analyze now?" after an import.
@@ -319,15 +314,10 @@ void runAnalyze() {
         f->pl = pl;
         startVerify(f);
     };
+    // v0.3.0: no question first. The windows are measured by replaying the level, so a recording that is only exact to `res` ticks (no
+    // click-between-frames) is fine: its clicks are fitted to the game's timing, and the result says so (COARSE_INPUT is also listed there).
     int res = S().file->timing.clickResolution;
-    if (res > 1) {  // Part 3 / 8.9: show COARSE_INPUT BEFORE the analysis runs
-        createQuickPopup("COARSE_INPUT",
-                         "Clicks in this file are only exact to " + std::to_string(res) + " ticks (no click-between-frames).\n"
-                         "The windows are still measured correctly, but where inside that span a click really happened is unknown.\n"
-                         "Run the analysis anyway?",
-                         "Cancel", "Run", [go](FLAlertLayer*, bool yes) { if (yes) go(); });
-        return;
-    }
+    if (res > 1) G::notify("Clicks are only exact to " + std::to_string(res) + " ticks: the replay will fit them to the game");
     go();
 }
 

@@ -6,7 +6,7 @@
 		"mac": "2.2081",
 		"ios": "2.2081"
 	},
-	"version": "v0.2.1",
+	"version": "v0.3.0",
 	"id": "clirfan.gdfwr",
 	"name": "GDFWR - Frame Window Recorder",
 	"developer": "clirfan",
@@ -52,17 +52,17 @@
 		},
 		"auto-repair": {
 			"type": "bool",
-			"name": "Auto-repair a failed verification",
-			"description": "When the player dies during the check, the click that was active is moved +1, +2 ... ticks later and then -1, -2 ... ticks earlier, until the run reaches the end of the level. The file becomes EDITED. Off = the check just reports the failure.",
+			"name": "Fit the clicks to the game when the macro does not pass",
+			"description": "A recording made at a low frame rate is only exact to one frame, so a click can be a few ticks off. When the player dies during the check, the click that was active is moved by the smallest amount that gets the run past that point (+1, -1, +2, -2 ... ticks) until the run reaches the end of the level. Every moved click is listed in the result (recorded -> now) and Edit clicks > Restore all brings the recorded ticks back. Off = the check just reports the failure.",
 			"default": true
 		},
 		"repair-max-shift": {
 			"type": "int",
-			"name": "Auto-repair: largest shift (ticks)",
-			"description": "How far the click is moved in each direction before giving up.",
+			"name": "Fit: largest shift (ticks)",
+			"description": "How far a click is moved in each direction before giving up. It is never smaller than one frame of the recording (240 / FPS ticks) plus 2, so a recording made at 14 FPS is searched 19 ticks each way whatever this says.",
 			"default": 10,
 			"min": 1,
-			"max": 30
+			"max": 60
 		},
 		"search-reach": {
 			"type": "int",
@@ -78,6 +78,26 @@
 			"description": "Default off: the press window moves only the press and the release window only the release, each action on its own. On = the v0.1 rule: the press window moves press and release together (the hold stays the same).",
 			"default": false
 		},
+		"count-untrusted-recording": {
+			"type": "bool",
+			"name": "Count clicks of a recording with a flagged tick counter",
+			"description": "On (default): the windows are measured by replaying the level, so a flagged tick counter or input of the RECORDING (UNRELIABLE_TICK, UNRELIABLE_INPUT) does not stop a click from being counted; the check and the fit have already proved that the macro, as it is now, passes. Off = the old rule: every click near such a flag is marked UNRELIABLE and not counted.",
+			"default": true
+		},
+		"fast-converge": {
+			"type": "bool",
+			"name": "Stop a run that is back on the verified run",
+			"description": "On (default): when a moved click leads to exactly the same game state as the verified run for 4 ticks in a row, the rest of the run is the verified run, so it is not simulated any further. Much faster; the windows are the same. Off = every run is simulated up to the next click.",
+			"default": true
+		},
+		"full-scan-top": {
+			"type": "int",
+			"name": "Tick-by-tick scan of the tightest clicks",
+			"description": "After the measurement, this many of the tightest clicks are scanned again tick by tick on both sides (pass map, holes and traps). 0 (default) = off: the window counts do not need it, and it about doubles the time.",
+			"default": 0,
+			"min": 0,
+			"max": 200
+		},
 		"title-replay": {
 			"type": "title",
 			"name": "Replay"
@@ -87,6 +107,22 @@
 			"name": "Show precision readout",
 			"description": "Raw Precision (24h) in sigma/s at the bottom left of the replay. PROVISIONAL: the model is not confirmed yet.",
 			"default": true
+		},
+		"ring-hold": {
+			"type": "float",
+			"name": "Ring: seconds fully visible",
+			"description": "A ring appears at once (no animation) and stays at full strength for this long.",
+			"default": 1.0,
+			"min": 0.0,
+			"max": 10.0
+		},
+		"ring-fade": {
+			"type": "float",
+			"name": "Ring: seconds of fading",
+			"description": "After the time above the ring fades out slowly over this many seconds.",
+			"default": 2.0,
+			"min": 0.1,
+			"max": 10.0
 		},
 		"title-keys": {
 			"type": "title",

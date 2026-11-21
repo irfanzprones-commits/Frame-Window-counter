@@ -12,7 +12,8 @@
 namespace gdfwr {
 
 inline constexpr int kRepairDefaultShift = 10;   // largest shift tried in each direction
-inline constexpr int kRepairMaxClicks = 5;       // clicks repaired one after the other before giving up
+inline constexpr int kRepairMaxClicks = 400;     // v0.3.0 (was 5): trouble spots fitted one after the other before giving up. A recording made at a low
+                                                 // frame rate can be off by a few ticks at EVERY click, so every one of them may need its own fit.
 
 // One click of the final run: a press and (unless the run ends while holding) its release, both of the same player.
 struct RepairClick {

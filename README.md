@@ -46,8 +46,28 @@ Everything that depends on a GD 2.2081 / Geode binding name is marked `[BINDING]
 
 ### The one real risk of the design
 Verification and analysis restore game states with the game's own practice checkpoints. If 2.2081 checkpoints do not restore
-some internal field, the "offset 0" check (Analysis 4.10) will flag those clicks `UNRELIABLE` instead of reporting a wrong
-window. If many clicks are flagged, extend `GameSimulator::run` (state restore) and `Bridge::stateHash`; the engine does not change.
+some internal field, the "offset 0" check (Analysis 4.10) no longer flags those clicks `UNRELIABLE` (0.3.0): `GameSimulator` marks the
+saved state as untrusted and measures what starts there by replaying the level from tick 0 (slower, exact), and the result says
+`RESTORE_REPLAYED`. If that happens a lot, extend `GameSimulator::runOnce` (state restore) and `Bridge::stateHash`; the engine does not change.
+
+## What changed in 0.3.0 (Analyze reworked)
+Reported from a real run: a tight jump recorded at 14-29 FPS. Analyze said "Macro repaired" (190 -> 192, on a second recording 187 -> 190), then showed
+`none` for every window and grey `?` rings. Findings, and what was changed. **None of this was run in Geometry Dash**: the logic is tested against the fake game.
+- **Why everything was `none`.** A recording made at a low frame rate gets the warnings COARSE_INPUT and UNRELIABLE_TICK, and `makeAnalysisInput`
+  marked every click near such a flag `UNRELIABLE`, which is never counted (and gives a grey `?` ring), even though the same popup said "the windows are still
+  measured correctly". Now the windows are measured by REPLAYING the level, so the flags of the RECORDING no longer exclude a click (setting "Count clicks of a recording
+  with a flagged tick counter", on by default; off = the old rule). `UNRELIABLE` now only means that the replay itself could not be reproduced.
+- **Why 190 became 192.** At 14-29 FPS one frame is 8-17 ticks and the recorder can only store the tick at the start of the frame, so a recorded click can be that far from
+  the tick the game used. The fit moves a click that does not pass by the smallest shift that gets past the failure (+1, -1, +2, -2 ...; it used to try ten later shifts before the
+  first earlier one), searches at least one recorded frame each way, no longer gives up after 5 clicks, and the result lists every moved click as `recorded -> now`
+  (and the recorded ticks next to each row). No "Macro repaired" dialog, no question before Analyze; `Edit clicks > Restore all` still brings the recorded ticks back.
+- **Saved states that do not restore exactly** no longer ruin a click: see "The one real risk" above.
+- **Faster**: a run that is back on the verified run for 4 ticks stops there (setting "Stop a run that is back on the verified run"; 30273 -> 3372 simulated ticks in test T24
+  with identical windows), the second tick-by-tick scan of the 20 tightest clicks is off by default (setting "Tick-by-tick scan of the tightest clicks"), and the progress popup
+  gives the work about half of each frame (8-40 ms) instead of a fixed 8 ms, which was a tenth of the time at 14 FPS.
+- **Rings**: no growing animation; a ring appears at full strength, stays fully visible for 1 s and fades out over 2 s (settings "Ring: seconds fully visible / of fading"). It is drawn
+  on the screen where the player was when it clicked, as a child of the replay HUD: before, it lived in the level (scrolled out of the screen) and a ring that was still alive when
+  the replay stopped or the level restarted stayed behind in the level for good. A release that never mattered shows a grey `any`, a click that could not be measured a grey `?`.
 
 ## What changed in 0.2.0 (analysis rework)
 - **Per-action windows**: the press window moves only the press, the release window only the release (old rule: setting "Press window moves the release too").
@@ -64,9 +84,9 @@ window. If many clicks are flagged, extend `GameSimulator::run` (state restore) 
 - **xdBot**: **not enabled.** Its layout is not publicly documented and the spec says "do not guess". `XdBotReader` is a stub; send me a sample `.xd` file or its spec and it is a small addition.
 - **Frame offset per format (D9)** is `0` until test I-5 is measured on a real file.
 - **Precision readout** ("Raw Precision (24h) in sigma/s") uses my reading of Appendix A item 5: sigma = 1/L seconds, p_i = erf(z/sqrt2) with z = N_i/240/2 * L, an attempt costs the full level time, L solved for 24 h. It is labelled provisional in the settings and must be confirmed before you trust the number.
-- Replay numbers come from the stored ANALYSIS (must be CURRENT); windows above 12 land in bucket 9-12 and the ring shows `N+`; unreliable / random / not-analysed windows get a grey `?` ring and are not counted.
+- Replay numbers come from the stored ANALYSIS (must be CURRENT); windows above 12 land in bucket 9-12 and the ring shows `N+`; unreliable / random / not-analysed windows get a grey `?` ring and are not counted; a release that never mattered gets a grey `any` ring (not counted).
 - **Replay needs only a macro** (no analysis, no verification): the button is enabled whenever the file has a macro and grey when it has none. Rings carry numbers only when the analysis is CURRENT and the file VERIFIED; otherwise they are grey.
-- **Auto-repair**: if the player dies during the check, the click to blame (the one holding at that moment, then the next one) is moved +1..+10 ticks, then -1..-10 ticks, and the run is tried again; the first shift that reaches the end is kept and the file becomes EDITED. If nothing helps the file is not changed. See the settings "Auto-repair a failed verification" and "Auto-repair: largest shift".
+- **Fit (was auto-repair)**: if the player dies during the check, the click to blame (the one holding at that moment, then the next one) is moved by the smallest shift (+1, -1, +2, -2 ... up to the setting, but at least one recorded frame) and the run is tried again; the first shift that gets past the failure is kept and the file becomes EDITED. If nothing helps the file is not changed. See the settings "Fit the clicks to the game when the macro does not pass" and "Fit: largest shift".
 - There is **no Verify button**. **Analyze** is one process: 1. check the macro from start to end (verification, which also saves the game states the analysis starts from), 2. measure every click (Appendix A item 8). An imported file (PARTIAL until a verification reaches the end of the level) is analysed the same way and becomes COMPLETED when step 1 passes.
 - A synthetic **last release** (import or pause fix) is treated as "run ends while holding": release window N/A; the press window shifts the press only and cannot pass the end of the level.
 - Starting a level with the button already held adds a synthetic press at tick 0 (flagged `SYNTHETIC_EVENTS`).
@@ -84,6 +104,6 @@ window. If many clicks are flagged, extend `GameSimulator::run` (state restore) 
 src/core/   Geode-free C++: model, session, file, analysis, formats, metrics   (tests/test_core.cpp)
 src/game/   hooks, bridge to the game, jobs (verify / analyze / replay)
 src/ui/     panel, click editor, overlays, result view
-tests/      run.sh (core tests), verify_sim.sh (verification / repair logic vs. a fake game), syntax_check.sh (glue vs. stub), syntax-stubs/ (NOT the SDK)
+tests/      run.sh (core tests), verify_sim.sh (verification / fit / analysis jobs vs. a fake game), syntax_check.sh (glue vs. stub), syntax-stubs/ (NOT the SDK)
 ```
 Run the core tests anywhere with a C++23 compiler: `./tests/run.sh`.

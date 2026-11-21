@@ -5,6 +5,7 @@
 #include <Geode/Geode.hpp>
 
 #include <climits>
+#include <functional>
 #include <cstdio>
 
 #include "core/Session.hpp"
@@ -38,6 +39,9 @@ struct FakeGame : PlayLayer {
     float portalX = 1000.f;
     float x = 0;
     int tick = 0;
+    int lastPress = -1000;      // the state a real jump shows: y = ticks since the last press, up to 20 (then it is the same whatever the press tick was)
+    long stepsRun = 0;          // how many ticks the game really simulated (to see what the early stop on convergence saves)
+    bool badRestore = false;    // loadFromCheckpoint puts the player a little off: a saved state that does NOT reproduce the run (like an inexact checkpoint)
     std::vector<int> presses;
     EndPortalObject portal;
     PlayerObject p1;
@@ -50,14 +54,15 @@ struct FakeGame : PlayLayer {
     }
     ~FakeGame() { PlayLayer::current() = nullptr; }
     void resetLevelFromStart() override {
-        x = 0; tick = 0; presses.clear();
+        x = 0; tick = 0; presses.clear(); lastPress = -1000;
         m_gameState.m_levelTime = 0;
         m_started = !needsKick;
         m_levelEndAnimationStarted = false;
-        p1.setPositionX(0);
+        p1.setPositionX(0); p1.setPositionY(20); p1.m_holdingButtons.clear();
     }
     void startGame() override { m_started = true; }
-    void handleButton(bool down, int, bool) override { if (down) presses.push_back(tick); }
+    // like the real game: the hold is part of the state (and of its hash); only a press counts for an obstacle
+    void handleButton(bool down, int, bool) override { p1.m_holdingButtons[1] = down; if (down) { presses.push_back(tick); lastPress = tick; } }
     void step() {
         if (broken || !m_started) return;
         for (auto const& o : obstacles) {
@@ -66,18 +71,18 @@ struct FakeGame : PlayLayer {
             for (int p : presses) if (p >= o.lo && p <= o.hi) ok = true;
             if (!ok) return die();
         }
-        x += 1; tick++;
+        x += 1; tick++; stepsRun++;
         m_gameState.m_levelTime = tick / 240.0;
-        p1.setPositionX(x);
+        p1.setPositionX(x); p1.setPositionY(float(std::min(tick - lastPress, 20)));
     }
     // a real checkpoint: the whole state of this fake game (position, tick, the presses so far)
-    struct Cp : CheckpointObject { float x = 0; int tick = 0; std::vector<int> presses; };
-    CheckpointObject* createCheckpoint() override { auto* c = new Cp; c->x = x; c->tick = tick; c->presses = presses; return c; }
+    struct Cp : CheckpointObject { float x = 0; int tick = 0, lastPress = 0; std::vector<int> presses; };
+    CheckpointObject* createCheckpoint() override { auto* c = new Cp; c->x = x; c->tick = tick; c->lastPress = lastPress; c->presses = presses; return c; }
     void loadFromCheckpoint(CheckpointObject* o) override {
         auto* c = static_cast<Cp*>(o);
-        x = c->x; tick = c->tick; presses = c->presses;
+        x = c->x + (badRestore ? 0.5f : 0.f); tick = c->tick; presses = c->presses; lastPress = c->lastPress;
         m_gameState.m_levelTime = tick / 240.0;
-        p1.setPositionX(x);
+        p1.setPositionX(x); p1.setPositionY(float(std::min(tick - lastPress, 20)));
     }
     GameObject killer, acSpike;
     int antiCheatTick = -1;     // update()/processCommands() make the game's own anti-cheat call (destroyPlayer with its spike) at this tick
@@ -124,6 +129,34 @@ struct Rig {
     Rig() { G::State::get().sim.begin(); G::State::get().stepMode = G::StepMode::Direct; G::State::get().stepKick = false; }
     ~Rig() { G::State::get().sim.end(); }
 };
+
+
+// ---- analysis helper: verify a macro, then measure it with the REAL AnalyzeJob / GameSimulator against the fake game ----------------
+struct AnalysisRun {
+    bool ok = false;
+    AnalysisData data;
+    long steps = 0;
+    int untrusted = 0, zeroRuns = 0, converged = 0;
+};
+static AnalysisRun analyseWith(std::vector<std::array<int, 3>> acts, std::vector<Obstacle> obs, int endTick, bool badRestore,
+                               std::function<void(GdfwrFile&)> prep = {}) {
+    AnalysisRun out;
+    auto f = makeFile(std::move(acts), endTick);
+    if (prep) prep(f);
+    Rig r; r.game.obstacles = std::move(obs); r.game.badRestore = badRestore;
+    G::VerifyJob j(&r.game, f, r.sim); runToEnd(j);
+    if (!j.ok()) return out;
+    GdfwrFile verified = j.file();
+    Baseline base = *verified.baseline;
+    r.game.stepsRun = 0;
+    G::AnalyzeJob a(&r.game, verified, r.sim, base, INT_MAX, {});
+    for (int i = 0; i < 1000000 && !a.pump(1000.0); i++) {}
+    out.ok = a.file().analysis.has_value();
+    if (out.ok) out.data = *a.file().analysis;
+    out.steps = r.game.stepsRun;
+    out.untrusted = r.sim.untrustedStates(); out.zeroRuns = r.sim.zeroRuns(); out.converged = r.sim.convergedRuns();
+    return out;
+}
 
 static std::vector<int> pressTicks(GdfwrFile const& f) {
     std::vector<int> v;
@@ -396,6 +429,89 @@ int main() {
         CHECK(S.sim.dead); CHECK(G::killerText().find("no object at all") != std::string::npos);
         S.sim.clear();
         CHECK(G::isAnticheatSpike(&r.game, &r.game.acSpike)); CHECK(!G::isAnticheatSpike(&r.game, &other)); CHECK(!G::isAnticheatSpike(&r.game, nullptr));
+    }
+    // T22 (v0.3.0): a recording whose tick counter was flagged is still counted: the replay measures the LEVEL, not the recording
+    {
+        std::vector<std::array<int, 3>> acts{{100, 0, 1}, {120, 0, 0}, {300, 0, 1}, {320, 0, 0}};
+        std::vector<Obstacle> obs{{110, 97, 104}, {310, 297, 304}};
+        auto flag = [](GdfwrFile& f) { f.macro.segments[0].flags = SegFlag::UnreliableTick; };
+        auto a = analyseWith(acts, obs, 1000, false, flag);
+        CHECK(a.ok); CHECK_EQ(a.data.clicks.size(), size_t(2));
+        for (auto const& c : a.data.clicks) { CHECK((c.flags & ClickFlag::Unreliable) == 0); CHECK_EQ(c.in.early, 3); CHECK_EQ(c.in.late, 4); }
+        geode::Mod::stubBools()["count-untrusted-recording"] = false;                 // the old rule is still there as a setting
+        auto b = analyseWith(acts, obs, 1000, false, flag);
+        geode::Mod::stubBools()["count-untrusted-recording"] = true;
+        CHECK(b.ok); for (auto const& c : b.data.clicks) CHECK((c.flags & ClickFlag::Unreliable) != 0);
+    }
+    // T23 (v0.3.0): a saved state that does not restore exactly no longer ruins the clicks: what starts there is replayed from the level start
+    {
+        std::vector<std::array<int, 3>> acts; std::vector<Obstacle> obs;
+        for (int i = 0; i < 4; i++) { int P = 100 + 100 * i; acts.push_back({P, 0, 1}); acts.push_back({P + 20, 0, 0}); obs.push_back({P + 10, P - 3, P + 4}); }
+        auto good = analyseWith(acts, obs, 1000, false);
+        auto bad = analyseWith(acts, obs, 1000, true);
+        CHECK(good.ok); CHECK(bad.ok); CHECK_EQ(good.untrusted, 0); CHECK(bad.untrusted > 0); CHECK(bad.zeroRuns > 0);
+        CHECK_EQ(bad.data.clicks.size(), good.data.clicks.size());
+        bool same = bad.data.clicks.size() == good.data.clicks.size(), reliable = true;
+        for (size_t i = 0; same && i < bad.data.clicks.size(); i++) {
+            auto const &g = good.data.clicks[i], &b = bad.data.clicks[i];
+            same = g.in.early == b.in.early && g.in.late == b.in.late && g.out.early == b.out.early && g.out.late == b.out.late;
+            reliable = reliable && (b.flags & ClickFlag::Unreliable) == 0;
+        }
+        CHECK(same); CHECK(reliable);
+        if (!bad.data.clicks.empty()) { CHECK_EQ(bad.data.clicks[0].in.early, 3); CHECK_EQ(bad.data.clicks[0].in.late, 4); }
+        auto warns = [](AnalysisRun const& a, char const* code) { for (auto const& w : a.data.warnings) if (w.code == code) return true; return false; };
+        CHECK(warns(bad, "RESTORE_REPLAYED")); CHECK(!warns(good, "RESTORE_REPLAYED"));       // the user is told when the slow way was needed
+    }
+    // T24 (v0.3.0): a run that is back on the verified run stops there: the same windows, far fewer ticks simulated
+    {
+        std::vector<std::array<int, 3>> acts{{100, 0, 1}, {120, 0, 0}, {400, 0, 1}, {420, 0, 0}};
+        std::vector<Obstacle> obs{{110, 97, 104}, {410, 397, 404}};
+        geode::Mod::stubBools()["fast-converge"] = false;
+        auto slow = analyseWith(acts, obs, 2000, false);
+        geode::Mod::stubBools()["fast-converge"] = true;
+        auto fast = analyseWith(acts, obs, 2000, false);
+        CHECK(slow.ok); CHECK(fast.ok); CHECK_EQ(slow.data.clicks.size(), fast.data.clicks.size());
+        bool same = slow.data.clicks.size() == fast.data.clicks.size();
+        for (size_t i = 0; same && i < fast.data.clicks.size(); i++) {
+            auto const &s = slow.data.clicks[i], &f = fast.data.clicks[i];
+            same = s.in.early == f.in.early && s.in.late == f.in.late && s.in.stopEarly == f.in.stopEarly && s.in.stopLate == f.in.stopLate &&
+                   s.out.early == f.out.early && s.out.late == f.out.late;
+        }
+        CHECK(same); CHECK(fast.converged > 0); CHECK_EQ(slow.converged, 0);
+        CHECK(fast.steps * 2 < slow.steps);
+        std::printf("  (T24) ticks simulated: %ld without the early stop, %ld with it\n", slow.steps, fast.steps);
+    }
+    // T25 (v0.3.0): a recording that is off by a few ticks at EVERY click is fitted click by click (the limit used to be 5 spots, then
+    // everything was dropped), each by the smallest shift that works
+    {
+        std::vector<std::array<int, 3>> acts; std::vector<Obstacle> obs;
+        for (int i = 0; i < 8; i++) { int P = 100 + 100 * i; acts.push_back({P, 0, 1}); acts.push_back({P + 20, 0, 0}); obs.push_back({P + 10, P + 2, P + 8}); }
+        auto f = makeFile(acts, 1000);
+        Rig r; r.game.obstacles = obs;
+        G::VerifyJob j(&r.game, f, r.sim); runToEnd(j);
+        CHECK(j.ok()); CHECK_EQ(j.repairs().size(), size_t(8));
+        auto p = pressTicks(j.file());
+        bool plus2 = p.size() == 8; for (size_t i = 0; plus2 && i < p.size(); i++) plus2 = p[i] == 100 + 100 * int(i) + 2;
+        CHECK(plus2);                                                  // +1 and -1 fail, +2 passes: the smallest shift
+        bool kept = true; for (auto const& e : j.file().macro.events) kept = kept && e.editedTick >= e.tick - 2 && e.editedTick <= e.tick + 2;
+        CHECK(kept);
+    }
+    // T26 (v0.3.0): how far a click may be moved follows the recording: a file made at 14 FPS (17 ticks per frame) is searched 19 ticks each way
+    {
+        std::vector<std::array<int, 3>> acts{{100, 0, 1}, {140, 0, 0}};
+        std::vector<Obstacle> obs{{125, 115, 120}};                  // the press has to be at 115..120: 15 ticks later than recorded
+        {
+            auto f = makeFile(acts, 1000); f.timing.clickResolution = 1;
+            Rig r; r.game.obstacles = obs;
+            G::VerifyJob j(&r.game, f, r.sim); runToEnd(j);
+            CHECK(!j.ok());                                          // 10 ticks (the setting) is not enough for an exact recording
+        }
+        {
+            auto f = makeFile(acts, 1000); f.timing.clickResolution = 17;
+            Rig r; r.game.obstacles = obs;
+            G::VerifyJob j(&r.game, f, r.sim); runToEnd(j);
+            CHECK(j.ok()); auto p = pressTicks(j.file()); CHECK(p.size() == 1 && p[0] == 115);
+        }
     }
     std::printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
