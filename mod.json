@@ -11,6 +11,11 @@
 	"name": "GDFWR - Frame Window Recorder",
 	"developer": "clirfan",
 	"description": "Records a run, proves it by replay, and measures the frame window of every click.",
+	"resources": {
+		"files": [
+			"resources"
+		]
+	},
 	"tags": [
 		"utility",
 		"gameplay"
