@@ -660,7 +660,14 @@ void feedReplay(PlayLayer* pl, int tick) {
         pl->handleButton(e.type == gdfwr::EventType::Press, gdfwr::kJump, e.player == 0);
         if (auto* hud = static_cast<ui::ReplayHud*>(R.hud.data())) {
             PlayerObject* p = e.player == 0 ? pl->m_player1 : pl->m_player2;
-            if (p && R.next < R.plan.rings.size()) hud->onAction(pl, R.plan.rings[R.next], p->getPosition());
+            if (p && R.next < R.plan.rings.size()) {
+                // The HUD keeps the ring in the coordinates of PlayLayer::m_objectLayer (the level). The player normally hangs directly under that
+                // layer, so its position is already in them. [BINDING] If it hangs under another node, the position goes through the screen first.
+                CCPoint where = p->getPosition();
+                if (auto* par = p->getParent(); par && pl->m_objectLayer && par != pl->m_objectLayer)
+                    where = pl->m_objectLayer->convertToNodeSpace(par->convertToWorldSpace(where));
+                hud->onAction(pl, R.plan.rings[R.next], where);
+            }
         }
         R.next++;
     }

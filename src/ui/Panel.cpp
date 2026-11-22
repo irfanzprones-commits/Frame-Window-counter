@@ -9,6 +9,7 @@
 #include <unordered_set>
 
 #include "Overlays.hpp"
+#include "PitchPopup.hpp"
 #include "core/FileIO.hpp"
 #include "core/Formats.hpp"
 #include "core/Session.hpp"
@@ -426,7 +427,7 @@ protected:
 };
 
 // ---- the panel ------------------------------------------------------------------------------------------------------------------
-enum Tag { tRecord = 1, tStop, tPause, tAnalyze, tReplay, tEdit, tSave, tSaveAs, tLoad, tImport, tExport };
+enum Tag { tRecord = 1, tStop, tPause, tAnalyze, tReplay, tEdit, tSave, tSaveAs, tLoad, tImport, tExport, tPitch };
 class GdfwrPanel;
 GdfwrPanel* s_panel = nullptr;  // the open panel, cleared by its destructor
 
@@ -470,7 +471,7 @@ public:
         }
         if (s.file && !s.file->header.warnings.empty()) l[4] = "! " + G::describeCode(s.file->header.warnings[0].code) + (s.file->header.warnings.size() > 1 ? "  (+" + std::to_string(s.file->header.warnings.size() - 1) + " more)" : "");
         for (size_t i = 0; i < l.size(); i++) m_line[i]->setString(l[i].c_str());
-        for (auto& [tag, btn] : m_btn) btn->setNormalImage(spriteFor(tag));
+        for (auto& [tag, btn] : m_btn) if (tag != tPitch) btn->setNormalImage(spriteFor(tag));   // the blue ring never changes, it is always available
     }
 protected:
     bool init() {
@@ -486,7 +487,7 @@ protected:
         }
         struct Col { char const* title; float x; std::vector<int> tags; };
         std::vector<Col> cols = {{"Recorder", 0.17f, {tRecord, tStop, tPause}},
-                                 {"Analysis", 0.50f, {tAnalyze, tReplay, tEdit}},
+                                 {"Analysis", 0.50f, {tAnalyze, tReplay, tEdit, tPitch}},   // v0.3.1: the 4th slot is the blue ring (ring sound pitch)
                                  {"File", 0.83f, {tSave, tSaveAs, tLoad, tImport, tExport}}};
         for (auto& c : cols) {
             auto t = CCLabelBMFont::create(c.title, "goldFont.fnt");
@@ -521,6 +522,7 @@ protected:
                 return;
             }
             case tEdit: EditPopup::create()->show(); return;
+            case tPitch: openPitchPopup(); return;   // opens on top of the panel; nothing in the panel changes
             case tSave: doSave(false); break;
             case tSaveAs: doSave(true); break;
             case tLoad: pickFile(file::PickMode::OpenFile, "GDFWR recording", {".gdfwr"}, G::recordingsDir(), [](std::filesystem::path p) { ensureSaved([p] { loadFrom(p); }); }); break;
@@ -542,10 +544,13 @@ private:
             case tSaveAs: return "Save As";
             case tLoad: return "Load";
             case tImport: return "Import";
+            case tPitch: return "Ring pitch";
             default: return "Export";
         }
     }
-    ButtonSprite* spriteFor(int tag) {
+    CCNode* spriteFor(int tag) {
+        // the blue ring with its caption (resources/ring-button.png); every other button is a green (or, when off, grey) text button
+        if (tag == tPitch) return makeRingCaptionButtonSprite(CCDirector::get()->getWinSize().height * 0.09f, labelFor(tag).c_str());
         return ButtonSprite::create(labelFor(tag).c_str(), "bigFont.fnt", reasonFor(tag).empty() ? "GJ_button_01.png" : "GJ_button_04.png", .7f);
     }
     // Part 8, 8.3: the reason why a button is off (empty = enabled)
@@ -569,6 +574,7 @@ private:
             case tSave: case tSaveAs: case tExport: return rec ? "Stop recording first." : final ? "" : "No recording is open.";
             case tLoad: return rec ? "Stop recording first." : "";
             case tImport: return rec ? "Stop recording first." : pl ? "" : "Open the level first.";
+            case tPitch: return {};   // always available: the pitch is only a setting of the ring sound
         }
         return {};
     }

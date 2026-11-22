@@ -6,7 +6,7 @@
 		"mac": "2.2081",
 		"ios": "2.2081"
 	},
-	"version": "v0.3.0",
+	"version": "v0.3.1",
 	"id": "clirfan.gdfwr",
 	"name": "GDFWR - Frame Window Recorder",
 	"developer": "clirfan",
@@ -111,7 +111,7 @@
 		"ring-hold": {
 			"type": "float",
 			"name": "Ring: seconds fully visible",
-			"description": "A ring appears at once (no animation) and stays at full strength for this long.",
+			"description": "A ring appears at once (no animation) and stays at full strength for this long. A ring that stays in the level scrolls off the screen in about a second at normal speed, so the two times matter mostly in slow parts, or when the setting \"Ring stays in the level\" is off.",
 			"default": 1.0,
 			"min": 0.0,
 			"max": 10.0
@@ -123,6 +123,30 @@
 			"default": 2.0,
 			"min": 0.1,
 			"max": 10.0
+		},
+		"ring-follow-level": {
+			"type": "bool",
+			"name": "Ring stays in the level",
+			"description": "On (default): a ring is fixed in the level at the place of the click or release and scrolls away with the level. Off: it stays where it appeared on the screen until it has faded. (The grey \"any\" ring, a release that never mattered, is not shown at all.)",
+			"default": true
+		},
+		"title-sound": {
+			"type": "title",
+			"name": "Ring sound"
+		},
+		"ring-sound": {
+			"type": "bool",
+			"name": "Play a sound when a ring appears",
+			"description": "Plays classic.wav for every ring with a measured window; the grey ? ring is silent. Every label has its own pitch: set it with the blue Ring pitch button in the GDFWR panel, or with the small blue ring above the counters during a replay.",
+			"default": true
+		},
+		"ring-sound-volume": {
+			"type": "float",
+			"name": "Ring sound volume",
+			"description": "0 = silent, 1 = full volume.",
+			"default": 1.0,
+			"min": 0.0,
+			"max": 1.0
 		},
 		"title-keys": {
 			"type": "title",

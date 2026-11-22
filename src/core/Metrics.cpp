@@ -106,4 +106,21 @@ float ringOpacity(float age, float hold, float fade) {
     return a > 0.f ? a : 0.f;
 }
 
+RingLook ringLook(const ReplayRing& r) {
+    RingLook l;
+    if (r.known) l.counted = l.visible = l.sound = true;
+    else if (!r.insensitive) l.visible = true;   // grey "?"; the grey "any" (insensitive) is invisible and silent
+    return l;
+}
+
+int defaultRingPitchPercent(ReplayBucket b) {
+    // HUD order, top to bottom: 25+, 13-24, 9-12, 7-8, 5-6, 4, 3, 2, 1. The owner gave 1 = 40, 2 = 60, 3 = 80, 4 = 100 and 5-6 = 120;
+    // the labels above 5-6 continue with +20 per label [DECISION].
+    static const int p[] = {200, 180, 160, 140, 120, 100, 80, 60, 40};
+    return p[std::clamp(int(b), 0, kReplayBucketCount - 1)];
+}
+int clampPitchPercent(int percent) { return std::clamp(percent, kPitchMinPercent, kPitchMaxPercent); }
+float pitchSpeed(int percent) { return float(clampPitchPercent(percent)) / 100.f; }
+std::string ringPitchKey(ReplayBucket b) { return "pitch-pct-" + std::to_string(std::clamp(int(b), 0, kReplayBucketCount - 1)); }
+
 }  // namespace gdfwr

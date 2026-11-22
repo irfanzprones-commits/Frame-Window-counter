@@ -19,8 +19,9 @@ Before publishing, change `id` and `developer` in `mod.json` (`yourname.gdfwr`).
 | `.gdfwr` file: sections, CRC32, stale rule, damaged / newer file, atomic save + `.bak` (Parts 2, 8.4, 8.5) | `src/core/FileIO.*` | **Compiled and unit-tested**, parsers fuzzed with 20 000 mutated files |
 | Analysis engine: walk, clamps, fast + full scan, long search, bisection, holes/traps, clusters, drift, flags, summary, cancel (Part 4) | `src/core/Analysis.*` | **Compiled and unit-tested** against a mock game, including the worked example of the spec (old rule) and the per-action rule |
 | Import / export, GDR2 reader + writer, cleaning rules, loss list (Part 8.6, 8.7) | `src/core/Formats.*` | **Compiled and unit-tested** (I-2, I-3, I-4 style cases, lossless round trip) |
-| Replay buckets, rings plan, precision model (Part 9) | `src/core/Metrics.*` | **Compiled and unit-tested** (precision model is provisional, see below) |
+| Replay buckets, rings plan, precision model, which ring is drawn / counted / heard, pitch table (Part 9, 0.3.1) | `src/core/Metrics.*` | **Compiled and unit-tested** (precision model is provisional, see below) |
 | Game hooks, game bridge, real-game simulator, verification pass, replay, UI | `src/game/*`, `src/ui/*` | **Written, NOT compiled against the real SDK and NOT run in the game.** Syntax-checked against a stub (`tests/syntax_check.sh`); the verification / auto-repair state machine is also run against a fake game (`tests/verify_sim.sh`), which proves our logic but nothing about Geometry Dash itself. |
+| Replay HUD (rings), ring sound, pitch popup, ring button, picture files (0.3.1) | `src/ui/Overlays.*`, `src/ui/PitchPopup.*`, `src/game/RingSound.*`, `feedReplay` in `src/game/Jobs.cpp`, `logo.png`, `resources/` | **The real code is run against the hand-written stub** (`tests/hud_test.sh`, 532 checks): a ring on a level that scrolls, the invisible `any` ring, the pitch sent to the sound engine, every button of the popup. That proves our logic; it does not prove that the real Geode / GD calls behave like the stub (list below). |
 
 The Geode SDK could not be installed in the environment where this was written (no network for the build tools), so the
 last row is the honest gap. Expect a few compile errors on the first `geode build`; they will be small and local.
@@ -43,12 +44,45 @@ Everything that depends on a GD 2.2081 / Geode binding name is marked `[BINDING]
 7. `GJGameLevel::m_levelVersion`, `m_levelID.value()`, `m_levelString` (level identity and hash), random-trigger object IDs 1912 / 2068.
 8. (0.2.1, optional) `PlayLayer::m_anticheatSpike`: `Bridge::isAnticheatSpike`. Written so that it compiles without the member (it then answers "no"). If `Analyze`
    dies at tick 2 even now, the failure message names the object that killed the player; send that line and the Geode log lines `GDFWR: stepper check` / `GDFWR: death at tick`.
+9. (0.3.1) **The sound call**, `playRingSoundAt` in `src/game/RingSound.cpp` (the only place that touches the sound engine):
+   `FMODAudioEngine::sharedEngine()->playEffect(gd::string path, float speed, float pan, float volume)` with the path `"classic.wav"_spr` (the file is in `resources/`).
+   `speed` is the playback speed (1 = normal; pitch and length change together), `pan` 0 = centre. If the real signature is another one, that one line is the fix; the
+   file name could also need another form (the mod id in front is what `_spr` does). The first thing to check if the rings are silent. `CMakeLists.txt` already has the
+   iOS fix that includes `fmod.hpp`.
+10. (0.3.1) **Saved pitches**: `Mod::getSavedValue<int>(key, default)` / `setSavedValue<int>(key, value)` with the keys `pitch-pct-0` to `pitch-pct-8` (whole numbers, the safest part of
+    that API). Settings read as before: `getSettingValue<bool>("ring-follow-level" / "ring-sound")`, `getSettingValue<double>("ring-sound-volume")`.
+11. (0.3.1) **Where the ring is.** The ring stores the position of the player (`PlayerObject::getPosition()`, which is in the coordinates of its parent; normally `PlayLayer::m_objectLayer`) and every frame
+    `ReplayHud::placeRing` computes `this->convertToNodeSpace(m_pl->m_objectLayer->convertToWorldSpace(level))`. `feedReplay` converts the position first when the player hangs
+    under another node. Needs: `PlayLayer::m_objectLayer`, `PlayLayer::get()`, and the HUD's `update` running after the level's own update (it is scheduled later; if it ran
+    before, the ring would trail the scroll by one frame). If the ring sits beside the click but drifts, look here.
+12. (0.3.1) **The ring button**: `CCSprite::create("ring-button.png"_spr)` (a drawn ring takes over when it returns `nullptr`), a plain `CCNode` with a content size and anchor (0.5, 0.5) as the picture of a
+    `CCMenuItemSpriteExtra::create(node, target, menu_selector)`, `CCMenu` inside the replay HUD (`pl->m_uiLayer`), `createQuickPopup` for "Reset all", `Popup::init(w, h)` for the full-screen popup (as the panel does).
 
 ### The one real risk of the design
 Verification and analysis restore game states with the game's own practice checkpoints. If 2.2081 checkpoints do not restore
 some internal field, the "offset 0" check (Analysis 4.10) no longer flags those clicks `UNRELIABLE` (0.3.0): `GameSimulator` marks the
 saved state as untrusted and measures what starts there by replaying the level from tick 0 (slower, exact), and the result says
 `RESTORE_REPLAYED`. If that happens a lot, extend `GameSimulator::runOnce` (state restore) and `Bridge::stateHash`; the engine does not change.
+
+## What changed in 0.3.1 (ring position, ring sound, pitch popup, logo)
+Four requests from the owner. **None of this was run in Geometry Dash**: the real HUD, sound and popup code is run against the stub (`tests/hud_test.sh`); the calls into the game are the `[BINDING]` items 9 to 12 above.
+- **The ring stays where the click happened.** 0.3.0 converted the position to screen coordinates once, so the ring followed the screen. It now keeps its place in the level (`Ring::level`) and
+  puts itself at the screen position of that place every frame, so it scrolls away with the level (about a second at normal speed). It is still a child of the replay HUD and can never be
+  left in the level. Setting `ring-follow-level` (on); off = the 0.3.0 behaviour.
+- **The grey `any` ring is not shown** (no ring, no sound, still not counted). The grey `?` ring stays and is silent. The rule is one function, `ringLook` in `src/core/Metrics.cpp`.
+- **Ring sound.** `resources/classic.wav` plays when a ring with a measured window appears, at the pitch of its label (percent of the normal speed):
+
+  | label | 1 | 2 | 3 | 4 | 5-6 | 7-8 | 9-12 | 13-24 | 25+ |
+  |---|---|---|---|---|---|---|---|---|---|
+  | default pitch | 40 | 60 | 80 | 100 | 120 | 140 | 160 | 180 | 200 |
+
+  1 to 5-6 are the owner's values; **7-8 and up are my continuation (+20 per label), a [DECISION]**. The pitch is the playback speed, so a higher label also plays shorter.
+  Settings: `ring-sound` (on) and `ring-sound-volume` (0 to 1, default 1).
+- **Ring pitch popup.** A button in the shape of the blue ring, in the GDFWR panel (Analysis column, "Ring pitch") and above the "25+" counter during a replay, opens one row per
+  label with `-10 -1 +1 +10` and **Play** (always plays), plus **Reset all** (asks first) and **Close**. Range 10 to 400 %, saved per label (`pitch-pct-0` to `pitch-pct-8`). Defaults, clamp and keys are in
+  `src/core/Metrics.cpp` (unit-tested); the saved values and the sound call are in `src/game/RingSound.cpp`; the popup is `src/ui/PitchPopup.cpp`.
+- **Logo and button picture**: `logo.png` (336 x 336) and `resources/ring-button.png` (256 x 256, transparent). `python3 tools/make_images.py` draws both again (needs Pillow and the font Archivo Black;
+  `--font PATH` names another bold font). The ring copies the owner's reference screenshot (cyan band, cream-white middle with a halo).
 
 ## What changed in 0.3.0 (Analyze reworked)
 Reported from a real run: a tight jump recorded at 14-29 FPS. Analyze said "Macro repaired" (190 -> 192, on a second recording 187 -> 190), then showed
@@ -84,7 +118,9 @@ Reported from a real run: a tight jump recorded at 14-29 FPS. Analyze said "Macr
 - **xdBot**: **not enabled.** Its layout is not publicly documented and the spec says "do not guess". `XdBotReader` is a stub; send me a sample `.xd` file or its spec and it is a small addition.
 - **Frame offset per format (D9)** is `0` until test I-5 is measured on a real file.
 - **Precision readout** ("Raw Precision (24h) in sigma/s") uses my reading of Appendix A item 5: sigma = 1/L seconds, p_i = erf(z/sqrt2) with z = N_i/240/2 * L, an attempt costs the full level time, L solved for 24 h. It is labelled provisional in the settings and must be confirmed before you trust the number.
-- Replay numbers come from the stored ANALYSIS (must be CURRENT); windows above 12 land in bucket 9-12 and the ring shows `N+`; unreliable / random / not-analysed windows get a grey `?` ring and are not counted; a release that never mattered gets a grey `any` ring (not counted).
+- Replay numbers come from the stored ANALYSIS (must be CURRENT); windows above 12 land in bucket 9-12 and the ring shows `N+`; unreliable / random / not-analysed windows get a grey `?` ring (silent) and are not counted; a release that never mattered is not shown at all since 0.3.1 (it used to get a grey `any` ring), not counted, no sound.
+- **Ring sound pitch (0.3.1)**: 1 = 40 %, 2 = 60 %, 3 = 80 %, 4 = 100 %, 5-6 = 120 % are the owner's; **7-8 = 140, 9-12 = 160, 13-24 = 180, 25+ = 200 are my continuation (+20 per label)**. "Pitch" is the playback speed of `FMODAudioEngine::playEffect`, so a higher label also plays shorter; a pitch that keeps the length would need an FMOD DSP and is not attempted blind. The popup allows 10 to 400 %.
+- **Ring position (0.3.1)**: the ring is fixed at the place of the click in the level and scrolls away with it (setting `ring-follow-level`, default on). The ring picture follows the owner's reference screenshot (cream-white middle), not the "dark centre" of the hand-over note.
 - **Replay needs only a macro** (no analysis, no verification): the button is enabled whenever the file has a macro and grey when it has none. Rings carry numbers only when the analysis is CURRENT and the file VERIFIED; otherwise they are grey.
 - **Fit (was auto-repair)**: if the player dies during the check, the click to blame (the one holding at that moment, then the next one) is moved by the smallest shift (+1, -1, +2, -2 ... up to the setting, but at least one recorded frame) and the run is tried again; the first shift that gets past the failure is kept and the file becomes EDITED. If nothing helps the file is not changed. See the settings "Fit the clicks to the game when the macro does not pass" and "Fit: largest shift".
 - There is **no Verify button**. **Analyze** is one process: 1. check the macro from start to end (verification, which also saves the game states the analysis starts from), 2. measure every click (Appendix A item 8). An imported file (PARTIAL until a verification reaches the end of the level) is analysed the same way and becomes COMPLETED when step 1 passes.
@@ -103,7 +139,11 @@ Reported from a real run: a tight jump recorded at 14-29 FPS. Analyze said "Macr
 ```
 src/core/   Geode-free C++: model, session, file, analysis, formats, metrics   (tests/test_core.cpp)
 src/game/   hooks, bridge to the game, jobs (verify / analyze / replay)
-src/ui/     panel, click editor, overlays, result view
-tests/      run.sh (core tests), verify_sim.sh (verification / fit / analysis jobs vs. a fake game), syntax_check.sh (glue vs. stub), syntax-stubs/ (NOT the SDK)
+src/ui/     panel, click editor, overlays (recording HUD, replay HUD with the rings), pitch popup, result view
+resources/  classic.wav (ring sound), ring-button.png (the blue ring button)
+logo.png    the mod logo (336 x 336)
+tools/      make_images.py (draws logo.png and resources/ring-button.png again; Pillow + numpy)
+tests/      run.sh (core tests), verify_sim.sh (verification / fit / analysis jobs vs. a fake game), hud_test.sh (replay HUD, ring sound, pitch popup, picture files vs. the stub),
+            syntax_check.sh (glue vs. stub), syntax-stubs/ (NOT the SDK)
 ```
-Run the core tests anywhere with a C++23 compiler: `./tests/run.sh`.
+Run the tests anywhere with a C++23 compiler: `sh tests/run.sh`, `sh tests/verify_sim.sh`, `sh tests/hud_test.sh`, `sh tests/syntax_check.sh` (current counts: 657, 168, 532 checks, and "glue syntax OK").

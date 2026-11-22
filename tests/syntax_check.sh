@@ -4,6 +4,6 @@
 cd "$(dirname "$0")/.."
 for f in src/game/*.cpp src/ui/*.cpp src/main.cpp; do
   ${CXX:-g++} -std=c++23 -fsyntax-only -Wall -Wextra -Wno-unused-parameter -Wno-overloaded-virtual \
-      -Itests/syntax-stubs -Isrc -DGDFWR_VERSION='"0.3.0"' "$f" || exit 1
+      -Itests/syntax-stubs -Isrc -DGDFWR_VERSION='"0.3.1"' "$f" || exit 1
 done
 echo "glue syntax OK (stub API only)"

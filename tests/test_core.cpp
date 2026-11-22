@@ -518,6 +518,57 @@ TEST(replay_buckets_and_precision) {
     CHECK_EQ(formatPrecision(114.756), std::string("114.76"));
 }
 
+// ---- v0.3.1: ring sound pitch, and what a ring does ---------------------------------------------------------
+TEST(ring_pitch_table_clamp_keys) {
+    // the table the owner asked for, in percent of the normal speed: 1 = 40, 2 = 60, 3 = 80, 4 = 100 (normal), 5-6 = 120, then +20 per label
+    auto pitchOf = [](int window) { return defaultRingPitchPercent(replayBucket(window)); };
+    CHECK_EQ(pitchOf(1), 40); CHECK_EQ(pitchOf(2), 60); CHECK_EQ(pitchOf(3), 80); CHECK_EQ(pitchOf(4), 100);
+    CHECK_EQ(pitchOf(5), 120); CHECK_EQ(pitchOf(6), 120); CHECK_EQ(pitchOf(7), 140); CHECK_EQ(pitchOf(8), 140);
+    for (int w = 9; w <= 12; w++) CHECK_EQ(pitchOf(w), 160);
+    for (int w = 13; w <= 24; w++) CHECK_EQ(pitchOf(w), 180);
+    for (int w = 25; w <= 99; w++) CHECK_EQ(pitchOf(w), 200);
+    { int prev = 0; bool up = true; for (int w = 1; w <= 99; w++) { int p = pitchOf(w); up = up && p >= prev; prev = p; } CHECK(up); }   // a wider window never sounds lower
+    for (int i = 0; i < kReplayBucketCount; i++) {
+        int d = defaultRingPitchPercent(ReplayBucket(i));
+        CHECK(d >= kPitchMinPercent && d <= kPitchMaxPercent); CHECK_EQ(clampPitchPercent(d), d);
+        if (i > 0) CHECK(defaultRingPitchPercent(ReplayBucket(i - 1)) > d);                                   // HUD order: 25+ is the highest, 1 the lowest
+    }
+    CHECK_EQ(defaultRingPitchPercent(ReplayBucket::W25P), 200); CHECK_EQ(defaultRingPitchPercent(ReplayBucket::W1), 40);
+    // range 10..400 %, nothing outside it can be stored or played
+    CHECK_EQ(kPitchMinPercent, 10); CHECK_EQ(kPitchMaxPercent, 400);
+    CHECK_EQ(clampPitchPercent(10), 10); CHECK_EQ(clampPitchPercent(9), 10); CHECK_EQ(clampPitchPercent(0), 10); CHECK_EQ(clampPitchPercent(-50), 10);
+    CHECK_EQ(clampPitchPercent(400), 400); CHECK_EQ(clampPitchPercent(401), 400); CHECK_EQ(clampPitchPercent(2147483647), 400);
+    CHECK_EQ(clampPitchPercent(-2147483647 - 1), 10); CHECK_EQ(clampPitchPercent(123), 123);
+    // what the -10 / -1 / +1 / +10 buttons do at the two ends
+    CHECK_EQ(clampPitchPercent(15 - 10), 10); CHECK_EQ(clampPitchPercent(10 - 1), 10); CHECK_EQ(clampPitchPercent(395 + 10), 400); CHECK_EQ(clampPitchPercent(400 + 1), 400);
+    CHECK_EQ(clampPitchPercent(100 + 10), 110); CHECK_EQ(clampPitchPercent(100 - 1), 99);
+    // the factor given to the sound engine
+    CHECK(pitchSpeed(100) == 1.f); CHECK(std::abs(pitchSpeed(40) - 0.4f) < 1e-6f); CHECK(std::abs(pitchSpeed(200) - 2.f) < 1e-6f);
+    CHECK(std::abs(pitchSpeed(0) - 0.1f) < 1e-6f); CHECK(std::abs(pitchSpeed(100000) - 4.f) < 1e-6f);        // clamped first
+    // saved values: one key per bucket, 0 = 25+ ... 8 = 1, all different
+    CHECK_EQ(ringPitchKey(ReplayBucket::W25P), std::string("pitch-pct-0")); CHECK_EQ(ringPitchKey(ReplayBucket::W4), std::string("pitch-pct-5"));
+    CHECK_EQ(ringPitchKey(ReplayBucket::W1), std::string("pitch-pct-8"));
+    { std::set<std::string> keys; for (int i = 0; i < kReplayBucketCount; i++) keys.insert(ringPitchKey(ReplayBucket(i))); CHECK_EQ(keys.size(), size_t(kReplayBucketCount)); }
+}
+
+TEST(ring_look_any_is_invisible) {
+    ReplayRing measured; measured.known = true; measured.window = 4; measured.bucket = ReplayBucket::W4;
+    ReplayRing any; any.insensitive = true;                 // measured, but the release never mattered
+    ReplayRing unknown;                                     // "?": could not be measured
+    auto m = ringLook(measured), a = ringLook(any), u = ringLook(unknown);
+    CHECK(m.counted && m.visible && m.sound);
+    CHECK(!a.counted && !a.visible && !a.sound);            // v0.3.1: the grey "any" ring is not drawn and makes no sound
+    CHECK(!u.counted && u.visible && !u.sound);             // the grey "?" ring stays, silently
+    // end to end with a real plan: the "any" release of click 1 is invisible, the press of the same click is heard
+    GdfwrFile n = richFile(); n.analysis->clicks[0].out.releaseInsensitive = true;
+    auto plan = buildReplayPlan(n);
+    CHECK(plan.rings[1].insensitive); CHECK(!ringLook(plan.rings[1]).visible); CHECK(!ringLook(plan.rings[1]).sound);
+    CHECK(plan.rings[0].known); CHECK(ringLook(plan.rings[0]).visible); CHECK(ringLook(plan.rings[0]).sound); CHECK(ringLook(plan.rings[0]).counted);
+    // a plan without numbers (no analysis): every ring is a silent grey "?" and nothing is counted
+    GdfwrFile no = richFile(); no.analysis.reset(); no.header.verify = VerifyStatus::NotVerified;
+    for (auto const& r : buildReplayPlan(no).rings) { auto l = ringLook(r); CHECK(l.visible && !l.sound && !l.counted); }
+}
+
 
 // ---- v0.1.3: auto-repair of a failed verification -----------------------------------------------------
 TEST(repair_culprit_and_shifts) {

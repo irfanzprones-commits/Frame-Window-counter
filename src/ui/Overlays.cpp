@@ -5,6 +5,8 @@
 #include <cmath>
 #include <map>
 
+#include "PitchPopup.hpp"
+#include "game/RingSound.hpp"
 #include "game/State.hpp"
 
 using namespace geode::prelude;
@@ -88,10 +90,19 @@ bool ReplayHud::init(int levelTicks) {
     m_precision->setPosition({win.width * 0.015f, win.height * 0.03f});
     m_precision->setColor({255, 255, 255});
     this->addChild(m_precision);
+    // v0.3.1: the blue ring above the "25+" line opens the pitch popup. A menu only takes a touch that hits its button, every other touch goes on to
+    // the game, so this cannot swallow a click (section 7).
+    auto menu = CCMenu::create();
+    menu->setPosition({0.f, 0.f});
+    auto pitch = CCMenuItemSpriteExtra::create(makeRingIcon(win.height * 0.075f), this, menu_selector(ReplayHud::onPitch));
+    pitch->setPosition({win.width * 0.035f, win.height * 0.915f});
+    menu->addChild(pitch);
+    this->addChild(menu, 20);
     this->refreshText();
     this->scheduleUpdate();
     return true;
 }
+void ReplayHud::onPitch(CCObject*) { openPitchPopup(); }
 void ReplayHud::refreshText() {
     for (int i = 0; i < gdfwr::kReplayBucketCount; i++) {
         char b[48];
@@ -105,29 +116,42 @@ void ReplayHud::refreshText() {
     m_precision->setString(t.c_str());
 }
 void ReplayHud::onAction(PlayLayer* pl, gdfwr::ReplayRing const& ring, CCPoint where) {
-    if (ring.known) {
+    auto look = gdfwr::ringLook(ring);   // what this ring does: counted / drawn / heard (core/Metrics)
+    if (look.counted) {
         m_count[size_t(ring.bucket)]++;
         m_windows.push_back(ring.width);
         this->refreshText();
     }
-    m_hold = std::max(0.f, float(Mod::get()->getSettingValue<double>("ring-hold")));
-    m_fade = std::max(0.05f, float(Mod::get()->getSettingValue<double>("ring-fade")));
+    // v0.3.1: the grey "any" ring (a release that never mattered) is not shown at all: no ring, no sound.
+    if (!look.visible) return;
+    auto* mod = Mod::get();
+    m_hold = std::max(0.f, float(mod->getSettingValue<double>("ring-hold")));
+    m_fade = std::max(0.05f, float(mod->getSettingValue<double>("ring-fade")));
+    m_pl = pl;
     Ring r;
     r.colour = ring.known ? gdfwr::replayBucketColor(ring.bucket) : 0x888888;
-    // "?" = this click could not be measured; "any" = measured, but the release never mattered (nothing to count)
-    std::string txt = ring.known ? std::to_string(ring.window) + (ring.plus ? "+" : "") : (ring.insensitive ? "any" : "?");
+    std::string txt = ring.known ? std::to_string(ring.window) + (ring.plus ? "+" : "") : "?";   // "?" = this click could not be measured
+    // v0.3.1: the ring belongs to the place IN THE LEVEL where the action happened (as before v0.3.0), and update() keeps it there while the
+    // level scrolls. It stays a child of this HUD, so it can never be left behind in the level when the replay stops or the level restarts.
+    // With the setting "ring-follow-level" off it keeps the v0.3.0 behaviour: it stays where it appeared on the screen until it fades.
+    r.level = where;
+    r.follow = mod->getSettingValue<bool>("ring-follow-level");
     r.node = CCNode::create();
-    // v0.3.0: the ring is drawn where the player was ON THE SCREEN when the click happened and stays there while it fades. (Before, it was
-    // fixed in the level and scrolled out of the screen within a second, and a ring that was still alive when the replay stopped stayed in the
-    // level for good.)
-    CCPoint screen = pl->m_objectLayer->convertToWorldSpace(where);
-    r.node->setPosition(this->convertToNodeSpace(screen));
+    this->placeRing(r);   // the first position; update() calls the same function every frame while the ring follows the level
     r.text = label(txt.c_str(), "bigFont.fnt", 0.33f, {0.5f, 0.5f});
     r.text->setColor(rgb(r.colour));
     r.node->addChild(r.text, 1);
     this->addChild(r.node.data(), 10);
     this->paintRing(r, 1.f);
     m_rings.push_back(std::move(r));
+    // v0.3.1: the ring sound, only for a measured window (the grey "?" is silent); the pitch is the one of its label
+    if (look.sound && mod->getSettingValue<bool>("ring-sound")) game::playRingSound(ring.bucket);
+}
+// The place of the ring in the level -> the screen. convertToWorldSpace includes everything the game does to the level (camera, zoom, shake),
+// so the ring sits exactly where that place is drawn now. Only while the level of this HUD is still the current one.
+void ReplayHud::placeRing(Ring& r) {
+    if (!m_pl || m_pl != PlayLayer::get() || !m_pl->m_objectLayer) return;
+    r.node->setPosition(this->convertToNodeSpace(m_pl->m_objectLayer->convertToWorldSpace(r.level)));
 }
 // The circle is drawn again with the opacity it has now (a CCDrawNode has no opacity of its own).
 void ReplayHud::paintRing(Ring& r, float opacity) {
@@ -155,6 +179,7 @@ void ReplayHud::clear() {
 void ReplayHud::update(float dt) {
     for (auto& r : m_rings) {
         r.age += dt;
+        if (r.follow) this->placeRing(r);   // v0.3.1: scrolls away with the level
         float a = gdfwr::ringOpacity(r.age, m_hold, m_fade);
         if (a != r.shown) this->paintRing(r, a);
     }
