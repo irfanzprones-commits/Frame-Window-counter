@@ -5,9 +5,12 @@
 #include <memory>
 #include <set>
 
+#include <filesystem>
+
 #include "Bridge.hpp"
 #include "core/Analysis.hpp"
 #include "core/Repair.hpp"
+#include "core/Trace.hpp"
 
 namespace gdfwr::game {
 
@@ -80,9 +83,17 @@ public:
     std::string statusText() const;                              // text under the progress bar (includes the repair progress)
     std::vector<std::string> const& repairs() const { return m_repairLog; }   // clicks that were moved to make the run pass
     gdfwr::GdfwrFile& file() { return m_file; }
+    gdfwr::GdfwrFile const& fileRef() const { return m_file; }
     gdfwr::Baseline const& baseline() const { return m_base; }  // partial after a failure (for "Continue")
+    // v0.3.2 (Phase 2, measurement only): facts of the run that ended, for the comparison with the real playback (makeTraceReport).
+    bool hasDeathSample() const { return m_hasDeathAfter; }      // the state right AFTER the step in which the player died
+    gdfwr::Sample const& deathSample() const { return m_deathAfter; }
+    std::string const& killer() const { return m_killer; }       // "Killed by: ..." or empty
+    StepStats const& stepStats() const { return m_stepStats; }   // how the game was stepped during THAT run
+    SimCallStats const& simCalls() const { return m_simCalls; }
 private:
     void beginRun(gdfwr::GdfwrFile file);                         // (re)start from tick 0 with this file
+    void snapshotStats();                                         // v0.3.2: copy State::stepStats / simCalls when the run ends
     void stepOne();
     void fail(FailKind kind, int tick, std::string why);
     void onDeath(int t);
@@ -120,6 +131,12 @@ private:
     int m_spots = 0, m_tries = 0, m_spotTries = 0;
     std::string m_note;                            // "click 3: trying +2 ticks" / the summary of a failed repair
     std::vector<std::string> m_repairLog;
+    // ---- v0.3.2: measurement for the report ----
+    gdfwr::Sample m_deathAfter;
+    bool m_hasDeathAfter = false;
+    std::string m_killer;
+    StepStats m_stepStats;
+    SimCallStats m_simCalls;
 };
 
 // Part 5, steps 4-6: run the analysis engine against the real game.
@@ -183,6 +200,26 @@ private:
 // ---- Replay (Part 9) ----
 bool startReplay(PlayLayer* pl, std::string& err);
 void feedReplay(PlayLayer* pl, int tick);       // called from the processCommands hook, before the original
-void stopReplay(char const* why);               // why = nullptr: silent
+// why = nullptr: silent. `end` is only for the trace of the playback (v0.3.2): how the playback ended.
+void stopReplay(char const* why, gdfwr::TraceEnd end = gdfwr::TraceEnd::Died);
+
+// ---- v0.3.2 (Phase 2): WHERE does the silent replay differ from the real playback? MEASUREMENT ONLY ----
+// While Replay plays the macro in the level, every processCommands call of the real game is noted (State::trace). The hook does:
+//     idx = replayPre(...)        first thing in the call: replayBegin (the sample of this tick, taken BEFORE the inputs of the tick are applied),
+//                                 then feedReplay (the inputs of this tick, as before)
+//     <the game's own processCommands>
+//     replayEnd(idx)              did the game's own call move the level clock?
+// replayPre / replayBegin return -1 when no trace is being recorded. Nothing here applies an input that was not applied before, moves a click or
+// changes how anything is stepped. The fake-game tests call replayPre / replayEnd, so the order "sample, then inputs" that they check is the order of the hook.
+int replayPre(PlayLayer* pl, int tick, float dt, bool isHalfTick, bool isLastTick);
+int replayBegin(PlayLayer* pl, int tick, float dt, bool isHalfTick, bool isLastTick);
+void replayEnd(PlayLayer* pl, int callIdx);
+// The comparison of a FINISHED silent replay with the last real playback. The text is in core/Trace.cpp; this only collects the facts.
+gdfwr::TraceReport makeTraceReport(VerifyJob const& v);
+// Writes the two .csv files of a report that compared something into `dir`. Returns the files written; `error` says what failed.
+std::vector<std::filesystem::path> writeTraceFiles(gdfwr::TraceReport const& r, std::string const& levelName, std::filesystem::path const& dir,
+                                                   std::string& error);
+// One Geode log line per line, each starting with "GDFWR-TRACE ".
+void logTraceLines(std::vector<std::string> const& lines);
 
 }  // namespace gdfwr::game

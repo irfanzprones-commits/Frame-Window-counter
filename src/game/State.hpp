@@ -3,6 +3,7 @@
 #pragma once
 #include <Geode/Geode.hpp>
 
+#include <algorithm>
 #include <ctime>
 #include <filesystem>
 #include <optional>
@@ -10,6 +11,7 @@
 #include "core/Metrics.hpp"
 #include "core/Model.hpp"
 #include "core/Session.hpp"
+#include "core/Trace.hpp"
 
 #ifndef GDFWR_VERSION
 #define GDFWR_VERSION "0.1.0"
@@ -44,10 +46,37 @@ struct SimFlags {
 //  Update: GJBaseGameLayer::update(1/240), the game's own per-frame function (one physics step, end test included).
 enum class StepMode : uint8_t { Direct = 0, Update = 1 };
 
+// v0.3.2 (Phase 2), MEASUREMENT ONLY: how OUR silent replay stepped the game. These counters are written by stepTick() and by the
+// processCommands hook and are only ever read for the report that compares the silent replay with the real playback.
+struct StepStats {
+    uint64_t steps = 0;               // stepTick calls
+    uint64_t forced = 0;              // ... after which the MOD had to move the level clock itself because the game's own call did not
+    double advMin = 0, advMax = 0;    // how far (in ticks) the game's own call moved the level clock inside one step
+    void note(double advTicks, bool wasForced) {
+        if (steps == 0) advMin = advMax = advTicks;
+        else { advMin = std::min(advMin, advTicks); advMax = std::max(advMax, advTicks); }
+        steps++;
+        if (wasForced) forced++;
+    }
+};
+// What the processCommands hook saw while the silent replay ran (Direct: our own call; Update: the calls the game's update() makes itself).
+struct SimCallStats {
+    uint64_t calls = 0, half = 0, last = 0;
+    float dtMin = 0, dtMax = 0;
+    void note(float dt, bool isHalfTick, bool isLastTick) {
+        if (calls == 0) dtMin = dtMax = dt;
+        else { dtMin = std::min(dtMin, dt); dtMax = std::max(dtMax, dt); }
+        calls++;
+        if (isHalfTick) half++;
+        if (isLastTick) last++;
+    }
+};
+
 struct ReplayState {
     bool active = false;
     std::vector<gdfwr::Event> events;  // final run, in execution order
     size_t next = 0;
+    int traceIdx = -1;                 // v0.3.2: index in State::trace.calls of the processCommands call that is running now (-1 = none)
     gdfwr::ReplayPlan plan;
     std::array<int, gdfwr::kReplayBucketCount> counters{};
     geode::Ref<cocos2d::CCNode> hud;  // ui::ReplayHud
@@ -63,6 +92,9 @@ struct State {
     bool pendingStart = false;             // Record was pressed: the next level reset starts the session
     SimFlags sim;
     ReplayState replay;
+    gdfwr::RealTrace trace;                // v0.3.2: the last real playback, one entry per processCommands call (Jobs.cpp replayBegin / replayEnd)
+    StepStats stepStats;                   // v0.3.2: the steps of the silent replay (reset when a verification run starts)
+    SimCallStats simCalls;                 // v0.3.2: the processCommands calls the hook saw while the silent replay ran
     StepMode stepMode = StepMode::Direct;  // set by calibrateStepper at the start of every verification
     bool stepKick = false;                 // the level needed PlayLayer::startGame() after a restart before the player moved
     std::string stepText;                  // what the calibration saw (for the failure report)

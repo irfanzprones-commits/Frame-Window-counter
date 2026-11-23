@@ -22,8 +22,7 @@ private:
     cocos2d::CCLabelBMFont* m_label = nullptr;
 };
 
-// Replay HUD (Part 9): bucket counters on the LEFT, precision readout BOTTOM LEFT, a ring at every action, and (v0.3.1) a small blue ring
-// above the counters that opens the pitch popup.
+// Replay HUD (Part 9): bucket counters on the LEFT, precision readout BOTTOM LEFT, a ring at every action.
 class ReplayHud : public cocos2d::CCNode {
 public:
     static ReplayHud* create(int levelTicks);
@@ -32,23 +31,17 @@ public:
     void clear();
     void update(float dt) override;
 private:
-    // A ring is a child of THIS node (v0.3.0), so it can never stay behind in the level when the replay stops or the level restarts. Since v0.3.1
-    // its place is a place IN THE LEVEL (`level`): every frame it is put on the screen where that place is now, so it scrolls away with the level.
+    // v0.3.0: a ring is a child of THIS node (screen space), so it can never stay behind in the level when the replay stops or the level restarts.
     struct Ring {
         geode::Ref<cocos2d::CCNode> node;
         cocos2d::CCDrawNode* draw = nullptr;
         cocos2d::CCLabelBMFont* text = nullptr;
-        cocos2d::CCPoint level;   // where the action happened, in the coordinates of PlayLayer::m_objectLayer (where the player lives)
         uint32_t colour = 0;
         float age = 0.f;
-        float shown = -1.f;       // the opacity it was last drawn with
-        bool follow = true;       // setting "ring-follow-level" at the moment the ring appeared; false = it stays where it appeared on the screen
+        float shown = -1.f;   // the opacity it was last drawn with
     };
     void refreshText();
     void paintRing(Ring& r, float opacity);
-    void placeRing(Ring& r);      // puts the ring on the screen where its place in the level is now
-    void onPitch(cocos2d::CCObject*);
-    PlayLayer* m_pl = nullptr;    // the level the rings belong to; only used while it is still the current PlayLayer
     std::array<cocos2d::CCLabelBMFont*, gdfwr::kReplayBucketCount> m_lines{};
     std::array<int, gdfwr::kReplayBucketCount> m_count{};
     std::vector<Ring> m_rings;
@@ -82,12 +75,31 @@ private:
     bool m_finished = false;
 };
 
-// Result view (Part 5, step 6): summary on top, one row per click below.
+// Result view (Part 5, step 6): summary on top, one row per click below. v0.3.2: `extraRows` (the comparison of the silent replay with the real
+// playback, see core/Trace) are put in front of the summary.
 class ResultPopup : public geode::Popup {
 public:
-    static ResultPopup* create(gdfwr::GdfwrFile const& f);
+    static ResultPopup* create(gdfwr::GdfwrFile const& f, std::vector<std::string> const& extraRows = {});
 protected:
-    bool init(gdfwr::GdfwrFile const& f);
+    bool init(gdfwr::GdfwrFile const& f, std::vector<std::string> const& extraRows);
+};
+
+// v0.3.2: a text popup that SCROLLS, with two buttons, for a long message (createQuickPopup cannot scroll: a long text pushes its buttons off the
+// screen). The callback is called exactly once: true = the right button, false = the left button or any other way of closing the popup.
+class ChoicePopup : public geode::Popup {
+public:
+    static ChoicePopup* create(std::string const& title, std::vector<std::string> const& rows, std::string const& noText, std::string const& yesText,
+                               std::function<void(bool)> answer);
+protected:
+    bool init(std::string const& title, std::vector<std::string> const& rows, std::string const& noText, std::string const& yesText,
+              std::function<void(bool)> answer);
+    void onNo(cocos2d::CCObject*);
+    void onYes(cocos2d::CCObject*);
+    void onClose(cocos2d::CCObject*) override;
+private:
+    void answerOnce(bool yes);
+    std::function<void(bool)> m_answer;
+    bool m_answered = false;
 };
 
 std::string windowText(gdfwr::WindowResult const& w);  // "14 (5/8)" , "16+ (3/12+)" , "N/A"

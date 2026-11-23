@@ -41,21 +41,6 @@ ReplayPlan buildReplayPlan(const GdfwrFile& f);
 inline constexpr float kRingHoldDefault = 1.0f, kRingFadeDefault = 2.0f;
 float ringOpacity(float age, float hold, float fade);
 
-// v0.3.1: what a ring does when its action happens in the replay.
-//   measured window            -> counted, drawn, and it plays the ring sound
-//   "?" (could not be measured) -> drawn grey, NOT counted, silent
-//   "any" (the release never mattered) -> not drawn at all, not counted, silent
-struct RingLook { bool counted = false, visible = false, sound = false; };
-RingLook ringLook(const ReplayRing& r);
-
-// v0.3.1: the ring sound. Every label (bucket) has its own pitch, a percent of the normal speed of the sound (100 = the sound as it is,
-// 50 = an octave lower and twice as long). The owner sets it per label in the pitch popup; it is stored as a saved value per bucket.
-inline constexpr int kPitchMinPercent = 10, kPitchMaxPercent = 400;
-int defaultRingPitchPercent(ReplayBucket b);   // 1 = 40, 2 = 60, 3 = 80, 4 = 100, 5-6 = 120, then +20 per label: 7-8 = 140 ... 25+ = 200
-int clampPitchPercent(int percent);            // into kPitchMinPercent..kPitchMaxPercent
-float pitchSpeed(int percent);                 // the playback speed handed to the sound engine: clamped percent / 100
-std::string ringPitchKey(ReplayBucket b);      // name of the saved value: "pitch-pct-<index in HUD order>", 0 = 25+ ... 8 = 1
-
 // "Raw Precision (24h) in sigma/s". PROVISIONAL: the model is my reading from Appendix A item 5 and is
 // not confirmed by the owner. windows = N_i of every counted action; levelTicks = length of one attempt.
 double rawPrecision24h(const std::vector<int>& windows, int levelTicks);

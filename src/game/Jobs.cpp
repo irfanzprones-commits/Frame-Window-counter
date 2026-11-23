@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <ctime>
 
+#include "core/FileIO.hpp"
 #include "ui/Overlays.hpp"
 
 using namespace geode::prelude;
@@ -174,6 +176,10 @@ void VerifyJob::beginRun(gdfwr::GdfwrFile file) {
     m_tick = 0;
     m_moving = true;
     m_streamed = false;
+    m_hasDeathAfter = false;                         // v0.3.2: the facts of the report belong to THIS run only
+    m_killer.clear();
+    State::get().stepStats = StepStats{};
+    State::get().simCalls = SimCallStats{};
     m_sim.clear();
     m_pl->removeAllCheckpoints();
     restartForSim(m_pl);   // level from the start, a stale "level ended" flag cleared (it would end the run at tick 0)
@@ -199,8 +205,14 @@ std::string VerifyJob::statusText() const {
     return t;
 }
 
+void VerifyJob::snapshotStats() {
+    m_stepStats = State::get().stepStats;
+    m_simCalls = State::get().simCalls;
+}
+
 void VerifyJob::fail(FailKind kind, int tick, std::string why) {
     log::warn("GDFWR: verification failed at tick {}: {}", tick, why);
+    snapshotStats();
     m_done = true;
     m_ok = false;
     m_kind = kind;
@@ -210,18 +222,34 @@ void VerifyJob::fail(FailKind kind, int tick, std::string why) {
     m_file.header.verifyFailTick = tick;
 }
 
-// The player died at tick t. With auto-repair on, move the click that is to blame and run again (every try is a whole new run).
+// "click 12 (player 1): press 4318, release 4350" (the ticks the silent replay uses)
+static std::string describeClickTicks(gdfwr::RepairClick const& c) {
+    std::string s = "click " + std::to_string(c.index + 1) + " (player " + std::to_string(c.player + 1) + "): press " + std::to_string(c.pressTick);
+    s += c.hasRelease ? ", release " + std::to_string(c.releaseTick) : ", no release";
+    return s;
+}
+
+// The player died at tick t. With the Fit on, move the click that is to blame and run again (every try is a whole new run).
 // A "trouble spot" is one death and the clicks around it: the click holding at that moment, and the click that comes next (it may have
 // been too late). Every shift of every one of them is tried; the spot counts as repaired when the run survives it and dies
 // (or ends) somewhere clearly later.
 void VerifyJob::onDeath(int t) {
-    std::string why = "The player died at tick " + std::to_string(t) + ". The recording does not replay the same way.";
     // v0.2.1: what killed the player, and (for a death in the first second) how the game was stepped. The same lines go to the Geode log.
     std::string facts = killerText();
     if (t <= kEarlyDeathTicks) facts += (facts.empty() ? "" : "\n") + simDiagnostics(m_pl, m_startX);
     if (!m_candidate && !facts.empty()) log::info("GDFWR: death at tick {}: {}", t, facts);
-    if (!facts.empty()) why += "\n" + facts;
-    if (!m_auto) return fail(FailKind::Death, t, why + (m_note.empty() ? "" : "\n" + m_note));
+    // v0.3.1: the text of a check that FAILED. It is the SILENT REPLAY that died; the user's macro may well pass in normal playback (that is
+    // the case reported on a 120-frame-perfect jump), so the text no longer reads like a verdict on the recording. A failed check never
+    // keeps a moved click (giveUpRepair puts the original back), so "not changed" is always true here.
+    auto report = [&] {
+        std::string s = "The silent replay died at tick " + std::to_string(t) + ". Your macro was NOT changed.\n"
+                        "If it passes when you play it back normally, the fault is in the analysis (the silent replay is out of step with the game), not in your macro.";
+        for (auto const& c : gdfwr::culpritClicks(m_file.macro, t))
+            s += std::string("\n") + (c.pressTick <= t ? "Last click before the death: " : "Next click after the death: ") + describeClickTicks(c);
+        if (!facts.empty()) s += "\n" + facts;
+        return s;
+    };
+    if (!m_auto) return fail(FailKind::Death, t, report() + (m_note.empty() ? "" : "\n" + m_note));
     if (m_candidate && t <= m_spotTick + gdfwr::repairSpotMargin(m_maxShift)) return nextCandidate();   // still the same trouble spot
     if (m_candidate) {   // the moved click got the run past the spot: keep the shift and go on with whatever kills the run now
         m_accepted = m_file;
@@ -230,7 +258,7 @@ void VerifyJob::onDeath(int t) {
     }
     m_culprits = gdfwr::culpritClicks(m_file.macro, t);
     if (m_culprits.empty()) {
-        if (m_tries == 0) return fail(FailKind::Death, t, why + "\nAuto-repair: the macro has no click near this tick to move.");
+        if (m_tries == 0) return fail(FailKind::Death, t, report() + "\nFit: the macro has no click near this tick to move.");
         return giveUpRepair();
     }
     if (m_spots >= gdfwr::kRepairMaxClicks) return giveUpRepair();
@@ -282,8 +310,8 @@ void VerifyJob::giveUpRepair() {
         }
         char b[80];
         std::snprintf(b, sizeof b, "+1..+%d and -1..-%d ticks (%d tries)", m_maxShift, m_maxShift, m_tries);
-        note = "Auto-repair moved " + which + " by " + b + " but the run never got past this spot.";
-        if (m_spots > 1) note += " (" + std::to_string(m_spots - 1) + " earlier spot(s) were fixed, but those fixes were dropped.)";
+        note = "Fit moved " + which + " by " + b + " but the run never got past this spot.";
+        if (m_spots > 1) note += " (" + std::to_string(m_spots - 1) + " earlier spot(s) were fitted, but those moves were dropped.)";
         note += " The macro was not changed.";
     }
     m_auto = false;
@@ -313,7 +341,14 @@ void VerifyJob::stepOne() {
         m_pl->handleButton(e.type == gdfwr::EventType::Press, gdfwr::kJump, e.player == 0);
     }
     stepTick(m_pl);
-    if (S.sim.dead) return onDeath(t);
+    if (S.sim.dead) {
+        // v0.3.2 (measurement only): the state right after the step in which the player died, and who killed it. The report compares it with
+        // the real playback's state at the start of the next tick: equal = the movement of that step is the same and only the death differs.
+        m_deathAfter = sampleOf(m_pl);
+        m_hasDeathAfter = true;
+        m_killer = killerText();
+        return onDeath(t);
+    }
     // The level ended: this is the only way to become VERIFIED. The hooks of playEndAnimationToPos / levelComplete set
     // sim.done; the game's end flag and the end portal position are the safety nets (see Bridge.hpp). Last resort, for a level whose
     // end portal cannot be found at all: a RECORDED run that is still alive at the tick where the live run ended.
@@ -329,6 +364,7 @@ void VerifyJob::stepOne() {
             m_repairLog.push_back(gdfwr::describeShift(m_culprits[m_culpritIdx], m_curShift));
             log::info("GDFWR: repair kept: {}", m_repairLog.back());
         }
+        snapshotStats();
         m_done = true;
         m_ok = true;
         m_kind = FailKind::None;
@@ -647,6 +683,12 @@ bool startReplay(PlayLayer* pl, std::string& err) {
     pl->removeAllCheckpoints();
     pl->resetLevelFromStart();
     S.replay.active = true;  // set AFTER the reset: the reset hook stops a running replay
+    // v0.3.2 (measurement only): from here on every processCommands call of the real game is noted (setting "trace-playback"). The trace of an
+    // earlier playback goes away either way, so Analyze can never compare with a playback of another macro by accident.
+    if (Mod::get()->getSettingValue<bool>("trace-playback"))
+        S.trace.begin(gdfwr::computeMacroHash(S.file->macro), S.file->level.levelId, S.file->level.name, S.replay.events.size());
+    else
+        S.trace = gdfwr::RealTrace{};
     auto* hud = ui::ReplayHud::create(S.file->level.endTick);
     pl->m_uiLayer->addChild(hud, 99);
     S.replay.hud = hud;
@@ -654,32 +696,145 @@ bool startReplay(PlayLayer* pl, std::string& err) {
 }
 
 void feedReplay(PlayLayer* pl, int tick) {
-    auto& R = State::get().replay;
+    auto& S = State::get();
+    auto& R = S.replay;
+    size_t firstFed = R.next;
     while (R.next < R.events.size() && R.events[R.next].editedTick <= tick) {
         auto const& e = R.events[R.next];
         pl->handleButton(e.type == gdfwr::EventType::Press, gdfwr::kJump, e.player == 0);
         if (auto* hud = static_cast<ui::ReplayHud*>(R.hud.data())) {
             PlayerObject* p = e.player == 0 ? pl->m_player1 : pl->m_player2;
-            if (p && R.next < R.plan.rings.size()) {
-                // The HUD keeps the ring in the coordinates of PlayLayer::m_objectLayer (the level). The player normally hangs directly under that
-                // layer, so its position is already in them. [BINDING] If it hangs under another node, the position goes through the screen first.
-                CCPoint where = p->getPosition();
-                if (auto* par = p->getParent(); par && pl->m_objectLayer && par != pl->m_objectLayer)
-                    where = pl->m_objectLayer->convertToNodeSpace(par->convertToWorldSpace(where));
-                hud->onAction(pl, R.plan.rings[R.next], where);
-            }
+            if (p && R.next < R.plan.rings.size()) hud->onAction(pl, R.plan.rings[R.next], p->getPosition());
         }
         R.next++;
     }
+    if (R.next > firstFed && R.traceIdx >= 0) S.trace.noteFed(R.traceIdx, int(firstFed), int(R.next - firstFed));   // v0.3.2: which call applied which inputs
 }
 
-void stopReplay(char const* why) {
-    auto& R = State::get().replay;
+void stopReplay(char const* why, gdfwr::TraceEnd end) {
+    auto& S = State::get();
+    auto& R = S.replay;
     if (!R.active) return;
     R.active = false;
+    R.traceIdx = -1;
+    if (S.trace.recording) {   // v0.3.2: the trace of this playback ends here; one summary goes to the Geode log
+        S.trace.finish(end);
+        logTraceLines(gdfwr::describeRealTrace(S.trace));
+    }
     if (R.hud) R.hud->removeFromParent();
     R.hud = nullptr;
     if (why) notify(why);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// v0.3.2 (Phase 2): the trace of the real playback and its comparison with the silent replay. MEASUREMENT ONLY: nothing below applies an input,
+// moves a click, or changes how the silent replay steps the game.
+int replayBegin(PlayLayer* pl, int tick, float dt, bool isHalfTick, bool isLastTick) {
+    auto& S = State::get();
+    S.replay.traceIdx = -1;
+    if (!pl || !S.trace.recording) return -1;
+    uint8_t flags = uint8_t((isHalfTick ? gdfwr::TraceFlag::HalfTick : 0) | (isLastTick ? gdfwr::TraceFlag::LastTick : 0));
+    // The sample is taken HERE, before feedReplay applies the inputs of this tick: the same moment at which VerifyJob::stepOne pushes
+    // Baseline::samples (before the inputs of the tick, before the step). Both sides use the same convention, so tick t means the same.
+    S.replay.traceIdx = S.trace.beginCall(tick, pl->m_gameState.m_levelTime * double(gdfwr::kTps), dt, pl->m_gameState.m_timeWarp, flags, sampleOf(pl));
+    return S.replay.traceIdx;
+}
+
+int replayPre(PlayLayer* pl, int tick, float dt, bool isHalfTick, bool isLastTick) {
+    int idx = replayBegin(pl, tick, dt, isHalfTick, isLastTick);   // 1. the state at the START of the tick, before anything of this tick is applied
+    feedReplay(pl, tick);                                          // 2. the inputs of this tick (unchanged since v0.3.1)
+    return idx;
+}
+
+void replayEnd(PlayLayer* pl, int callIdx) {
+    if (!pl || callIdx < 0) return;
+    State::get().trace.endCall(callIdx, pl->m_gameState.m_levelTime * double(gdfwr::kTps));   // did the game's own call move the level clock, and by how much?
+}
+
+gdfwr::TraceReport makeTraceReport(VerifyJob const& v) {
+    auto& S = State::get();
+    auto const& file = v.fileRef();
+    gdfwr::TraceInput in;
+    in.modVersion = GDFWR_VERSION;
+    in.clickBetweenSteps = Mod::get()->getSettingValue<bool>("click-between-steps");
+    in.macro = &file.macro;
+    // what the file says about itself
+    auto& ff = in.file;
+    ff.levelName = file.level.name;
+    ff.levelId = file.level.levelId;
+    ff.twoPlayer = file.level.twoPlayer || file.level.dual;
+    ff.clickResolution = int(file.timing.clickResolution);
+    ff.cbf = file.timing.cbf;
+    ff.tps = int(file.timing.tps);
+    ff.inputs = int(gdfwr::finalRunEvents(file.macro).size());
+    {
+        float sum = 0.f, lowest = 0.f;
+        int n = 0;
+        for (auto const& f : file.timing.fps) {
+            if (!(f.avg > 0.f)) continue;
+            sum += f.avg;
+            lowest = n == 0 ? f.min : std::min(lowest, f.min);
+            n++;
+        }
+        if (n > 0) { ff.fpsAvg = sum / float(n); ff.fpsMin = lowest; }
+    }
+    // the silent replay: Baseline::samples[t] is the state at the START of tick t, before its inputs (VerifyJob::stepOne)
+    auto& sr = in.sim;
+    bool died = !v.ok() && v.failKind() == FailKind::Death;
+    sr.samples = v.baseline().samples;
+    sr.macroHash = gdfwr::computeMacroHash(file.macro);
+    sr.died = died;
+    sr.deathTick = died ? v.failTick() : -1;
+    sr.hasDeathSample = died && v.hasDeathSample();
+    sr.deathSample = v.deathSample();
+    sr.killer = v.killer();
+    sr.endTick = v.ok() ? file.level.endTick : -1;
+    sr.stepMode = S.stepMode == StepMode::Update ? "Update" : "Direct";
+    sr.stepKick = S.stepKick;
+    sr.stepProbe = S.stepText;
+    auto const& st = v.stepStats();
+    sr.steps = st.steps;
+    sr.clockForced = st.forced;
+    sr.clockAdvMin = st.advMin;
+    sr.clockAdvMax = st.advMax;
+    auto const& sc = v.simCalls();
+    sr.calls = sc.calls;
+    sr.halfCalls = sc.half;
+    sr.lastCalls = sc.last;
+    sr.dtMin = sc.dtMin;
+    sr.dtMax = sc.dtMax;
+    // the real playback: only when it is a playback of THIS macro on THIS level
+    if (!Mod::get()->getSettingValue<bool>("trace-playback")) in.unavailable = "The setting \"Record the real playback and compare it\" is off.";
+    else if (!S.trace.any()) in.unavailable = "No real playback was recorded since the game was started.";
+    else if (S.trace.macroHash != sr.macroHash)
+        in.unavailable = "The macro that was played back is not the macro that was checked (it was edited after the playback, or the Fit moved a click).";
+    else if (S.trace.levelId != file.level.levelId) in.unavailable = "The last playback was of another level.";
+    else in.real = &S.trace;
+    return gdfwr::buildTraceReport(in);
+}
+
+std::vector<std::filesystem::path> writeTraceFiles(gdfwr::TraceReport const& r, std::string const& levelName, std::filesystem::path const& dir,
+                                                   std::string& error) {
+    std::vector<std::filesystem::path> written;
+    if (!r.compared) return written;
+    std::string base = gdfwr::defaultFileName(levelName, localTime(), true, "");   // "Level_2026-11-23_0457"
+    struct Item { char const* suffix; std::string const* text; };
+    for (Item const& it : {Item{"_trace-real-playback.csv", &r.callsCsv}, Item{"_trace-compare.csv", &r.compareCsv}}) {
+        if (it.text->empty()) continue;
+        auto path = dir / (base + it.suffix);
+        std::vector<uint8_t> bytes(it.text->begin(), it.text->end());
+        std::string err;
+        if (!gdfwr::writeAtomicBytes(path, bytes, false, &err)) {
+            error += (error.empty() ? "" : "; ") + path.filename().string() + ": " + err;
+            continue;
+        }
+        written.push_back(path);
+    }
+    return written;
+}
+
+void logTraceLines(std::vector<std::string> const& lines) {
+    for (auto const& l : lines) log::info("GDFWR-TRACE {}", l);
 }
 
 }  // namespace gdfwr::game

@@ -40,12 +40,16 @@ class $modify(GdfwrBaseLayer, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& S = G::State::get();
         if (S.sim.active || !isThePlayLayer(this)) {
+            if (S.sim.active && isThePlayLayer(this)) S.simCalls.note(dt, isHalfTick, isLastTick);   // v0.3.2: only counted, for the report on the silent replay (Phase 2)
             GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
             return;
         }
         int tick = G::tickOf(this);
         double now = m_gameState.m_levelTime;
-        if (S.replay.active) G::feedReplay(PlayLayer::get(), tick);
+        // v0.3.2 (Phase 2, measurement only): replayPre takes the trace entry of a real playback FIRST, before the inputs of this tick are applied
+        // (the same moment as VerifyJob::stepOne takes Baseline::samples), and then feeds the inputs exactly as before. It does not change what is
+        // fed or how the game is called.
+        int traceIdx = S.replay.active ? G::replayPre(PlayLayer::get(), tick, dt, isHalfTick, isLastTick) : -1;
         if (S.session.capturing() && !S.justReset) {
             // the counter must go up by exactly 1 per call, and one tick must last 1/240 s (Part 1, 2.4)
             if (S.lastTick >= 0 && tick != S.lastTick + 1) S.session.flagSegment(gdfwr::SegFlag::UnreliableTick);
@@ -70,6 +74,7 @@ class $modify(GdfwrBaseLayer, GJBaseGameLayer) {
             }
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        if (traceIdx >= 0) G::replayEnd(PlayLayer::get(), traceIdx);   // v0.3.2: did the game's own call move the level clock?
         S.lastTick = tick;
         S.lastLevelTime = now;
         S.justReset = false;
@@ -90,7 +95,8 @@ class $modify(GdfwrPlayLayer, PlayLayer) {
         if (S.sim.active) { PlayLayer::resetLevel(); return; }
         int before = G::tickOf(this);
         if (S.replay.active) {
-            G::stopReplay(("Replay stopped at tick " + std::to_string(before) + ": the player died or the level was restarted. The macro does not pass here.").c_str());
+            G::stopReplay(("Replay stopped at tick " + std::to_string(before) + ": the player died or the level was restarted. The macro does not pass here.").c_str(),
+                          gdfwr::TraceEnd::Died);
         }
         if (S.session.unfinished()) S.session.noteFps(S.fpsAvg, S.fpsMin);
         PlayLayer::resetLevel();
@@ -126,7 +132,7 @@ class $modify(GdfwrPlayLayer, PlayLayer) {
     void levelComplete() {
         auto& S = G::State::get();
         if (S.sim.active) { S.sim.done = true; return; }  // verification: no end screen, nothing written to the save data
-        if (S.replay.active) G::stopReplay("Replay finished.");
+        if (S.replay.active) G::stopReplay("Replay finished.", gdfwr::TraceEnd::Completed);
         if (S.session.unfinished()) {
             S.session.complete(G::tickOf(this));
             PlayLayer::levelComplete();
@@ -182,7 +188,7 @@ class $modify(GdfwrPlayLayer, PlayLayer) {
     void onQuit() {
         auto& S = G::State::get();
         if (!S.sim.active) {
-            G::stopReplay(nullptr);
+            G::stopReplay(nullptr, gdfwr::TraceEnd::Left);
             G::finishRecording(this, gdfwr::EndReason::Exit);
         }
         PlayLayer::onQuit();

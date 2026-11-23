@@ -9,7 +9,6 @@
 #include <unordered_set>
 
 #include "Overlays.hpp"
-#include "PitchPopup.hpp"
 #include "core/FileIO.hpp"
 #include "core/Formats.hpp"
 #include "core/Session.hpp"
@@ -172,6 +171,8 @@ struct Flow {
     bool streamed = false;
     gdfwr::Baseline partial;  // after a failed verification (for "Continue")
     gdfwr::Baseline kept;     // baseline the analysis compares against
+    gdfwr::TraceReport report;   // v0.3.2 (Phase 2): the silent replay against the real playback of the same macro (empty when the setting is off)
+    bool haveReport = false;
 };
 
 void endFlow(std::shared_ptr<Flow> f) {
@@ -179,6 +180,51 @@ void endFlow(std::shared_ptr<Flow> f) {
     f->job.reset();
     f->verify.reset();
     f->lock->release(true);  // put the game back: level restarted, practice mode as before, own update loop resumed
+}
+
+// v0.3.2 (Phase 2, MEASUREMENT ONLY): compares the silent replay that just ended with the last real playback of the same macro, saves the numbers
+// as two .csv files next to the recordings and writes everything to the Geode log (lines "GDFWR-TRACE ..."). Nothing is moved or changed.
+void buildComparison(Flow& f) {
+    f.report = {};
+    f.haveReport = false;
+    if (!f.verify || !Mod::get()->getSettingValue<bool>("trace-playback")) return;
+    f.report = G::makeTraceReport(*f.verify);
+    f.haveReport = true;
+    std::string err;
+    auto files = G::writeTraceFiles(f.report, f.verify->fileRef().level.name, G::recordingsDir(), err);
+    std::vector<std::string> extra;
+    if (!files.empty()) {
+        std::string line = "The numbers are saved as csv files (open them in a spreadsheet): ";
+        for (size_t i = 0; i < files.size(); i++) line += std::string(i ? ", " : "") + files[i].filename().string();
+        extra.push_back(line);
+        extra.push_back("Folder: " + G::recordingsDir().string());
+    }
+    if (!err.empty()) extra.push_back("The csv files could not be written: " + err);
+    for (auto const& l : extra) { f.report.popup.push_back(l); f.report.result.push_back(l); f.report.log.push_back(l); }
+    G::logTraceLines(f.report.log);
+}
+
+// The text of a failed check: the message, then the comparison with the real playback (when it was measured), then the question. The comparison is long,
+// so it needs a popup that scrolls; without it (setting off) the old popup is used unchanged.
+void showFailure(std::shared_ptr<Flow> f, char const* title, std::string const& msg, std::string const& ask, char const* no, char const* yes,
+                 std::function<void(bool)> answer) {
+    if (!f->haveReport) {
+        createQuickPopup(title, msg + "\n\n" + ask, no, yes, [answer](FLAlertLayer*, bool b) { answer(b); });
+        return;
+    }
+    std::vector<std::string> rows;
+    size_t pos = 0;
+    while (pos <= msg.size()) {
+        size_t nl = msg.find('\n', pos);
+        rows.push_back(msg.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos));
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+    }
+    rows.push_back("");
+    for (auto const& l : f->report.popup) rows.push_back(l);
+    rows.push_back("");
+    rows.push_back(ask);
+    ChoicePopup::create(title, rows, no, yes, std::move(answer))->show();
 }
 
 void startAnalyze(std::shared_ptr<Flow> f, int until) {
@@ -204,7 +250,7 @@ void startAnalyze(std::shared_ptr<Flow> f, int until) {
         S().file = f->job->file();
         S().dirty = true;
         endFlow(f);
-        if (S().file->analysis) ResultPopup::create(*S().file)->show();   // v0.3.0: it also lists the clicks the fit moved
+        if (S().file->analysis) ResultPopup::create(*S().file, f->report.result)->show();   // v0.3.0: it also lists the clicks the fit moved
     };
     ProgressPopup::create("Analyze 2/2: measuring the clicks", std::move(h))->show();
 }
@@ -224,7 +270,7 @@ void startAnalyzeStreamed(std::shared_ptr<Flow> f, int until) {
         S().file = f->sjob->file();
         S().dirty = true;
         endFlow(f);
-        if (S().file->analysis) ResultPopup::create(*S().file)->show();
+        if (S().file->analysis) ResultPopup::create(*S().file, f->report.result)->show();
         if (failed) G::alertBox("Analysis stopped", why);
     };
     ProgressPopup::create("Analyze 2/2: measuring the clicks (in parts)", std::move(h))->show();
@@ -243,14 +289,17 @@ void onVerifyDone(std::shared_ptr<Flow> f) {
     f->streamed = v.needsStreaming();
     S().file = v.file();  // VERIFIED or FAILED(tick) is stored in the document (and the shifted clicks, when the repair worked)
     S().dirty = true;
+    // v0.3.2 (Phase 2): where does the silent replay differ from the real playback? Only when the silent replay really ran (a probe that never moved the
+    // player has nothing to compare).
+    if (v.ok() || v.failKind() == G::FailKind::Death || v.failKind() == G::FailKind::NoEnd) buildComparison(*f);
     if (v.ok()) {
         f->kept = *S().file->baseline;
         refreshPanel();
         if (!v.repairs().empty()) {
-            // v0.3.0: the macro did not pass at the recorded ticks (a recording made at a low frame rate is only exact to a frame), so the
-            // replay fitted the clicks to the game's own timing. No dialog to click away: the result screen lists every moved click
-            // (recorded -> now), and Edit clicks > Restore all brings the recorded ticks back.
-            G::notify("Fitted " + std::to_string(v.repairs().size()) + " click(s) to the game's timing: see the result");
+            // The Fit is on (v0.3.1: it is off by default) and the silent replay only passed after clicks were MOVED. That changed the
+            // macro; the result screen starts with a warning and lists every moved click (recorded -> now), and Edit clicks > Restore all
+            // brings the recorded ticks back.
+            G::notify("Fit MOVED " + std::to_string(v.repairs().size()) + " click(s) of your macro: see the result (Edit clicks > Restore all undoes it)", false);
         }
         return startAnalyzeAuto(f, INT_MAX);  // the macro replays to the end of the level: now measure it
     }
@@ -261,13 +310,14 @@ void onVerifyDone(std::shared_ptr<Flow> f) {
     auto kind = v.failKind();
     refreshPanel();
     if (kind == G::FailKind::Death) {
-        // Part 5, step 3: the user may still analyse the clicks that come BEFORE the failure
-        createQuickPopup("Verification failed", msg + "\n\nAnalyse only the clicks before tick " + std::to_string(tick) + "?", "No", "Continue",
-                         [f, tick](FLAlertLayer*, bool cont) { if (cont) startAnalyzeAuto(f, tick); else endFlow(f); });
+        // Part 5, step 3: the user may still analyse the clicks that come BEFORE the failure. v0.3.1: the message says that it is the
+        // silent replay that died and that the macro was not changed.
+        showFailure(f, "Silent replay failed", msg, "Analyse only the clicks before tick " + std::to_string(tick) + "? (Your macro stays as it is.)", "No", "Continue",
+                    [f, tick](bool cont) { if (cont) startAnalyzeAuto(f, tick); else endFlow(f); });
     } else if (kind == G::FailKind::NoEnd) {
         // The macro replayed without dying, so every click can still be measured; only the "reached the end" proof is missing.
-        createQuickPopup("Verification failed", msg + "\n\nThe file stays NOT verified. Measure the clicks anyway?", "No", "Measure",
-                         [f, tick](FLAlertLayer*, bool cont) { if (cont) startAnalyzeAuto(f, tick); else endFlow(f); });
+        showFailure(f, "Verification failed", msg, "The file stays NOT verified. Measure the clicks anyway?", "No", "Measure",
+                    [f, tick](bool cont) { if (cont) startAnalyzeAuto(f, tick); else endFlow(f); });
     } else {
         endFlow(f);
         G::alertBox("Verification failed", msg);
@@ -278,15 +328,17 @@ void startVerify(std::shared_ptr<Flow> f) {
     f->lock = std::make_unique<G::GameLock>(f->pl);   // also closes the pause menu: a paused game does not run
     f->sim = std::make_unique<G::GameSimulator>(f->pl);
     auto* mod = Mod::get();
-    f->verify = std::make_unique<G::VerifyJob>(f->pl, *S().file, *f->sim, mod->getSettingValue<bool>("auto-repair"),
-                                               int(mod->getSettingValue<int64_t>("repair-max-shift")));
+    // v0.3.1: "fit-clicks" (default OFF) replaces "auto-repair" (default on): a Fit moves clicks until the SILENT replay passes, which made
+    // a macro that passes in normal playback die at its spike. The new name means an old saved "on" is not read.
+    bool fit = mod->getSettingValue<bool>("fit-clicks");
+    f->verify = std::make_unique<G::VerifyJob>(f->pl, *S().file, *f->sim, fit, int(mod->getSettingValue<int64_t>("repair-max-shift")));
     ProgressPopup::Hooks h;
     h.pump = [f](double ms) { return f->verify->pump(ms); };
     h.status = [f]() { return f->verify->statusText(); };
     h.progress = [f]() { return f->verify->progress(); };
     h.cancel = [f]() { f->verify->cancel(); };
     h.done = [f]() { onVerifyDone(f); };
-    ProgressPopup::create("Analyze 1/2: replaying the macro (and fitting its clicks)", std::move(h))->show();
+    ProgressPopup::create(fit ? "Analyze 1/2: replaying the macro (and fitting its clicks)" : "Analyze 1/2: replaying the macro (nothing is moved)", std::move(h))->show();
 }
 
 // Why Analyze is not possible right now (empty = it is). One place for the button state and for the "Analyze now?" after an import.
@@ -308,6 +360,9 @@ std::string analyzeReason() {
 void runAnalyze() {
     if (!PlayLayer::get() || !S().file || S().sim.active) return;
     if (auto why = analyzeReason(); !why.empty()) return G::alertBox("Analyze", why);
+    // v0.3.2: a playback that is still running ends here. Its trace is kept (it is what the silent replay is compared with), and the replay is not
+    // left half-played behind the analysis.
+    if (S().replay.active) G::stopReplay("Replay stopped: Analyze was started.", gdfwr::TraceEnd::Analyze);
     auto go = [] {
         auto* pl = PlayLayer::get();
         if (!pl || !S().file) return;
@@ -316,9 +371,12 @@ void runAnalyze() {
         startVerify(f);
     };
     // v0.3.0: no question first. The windows are measured by replaying the level, so a recording that is only exact to `res` ticks (no
-    // click-between-frames) is fine: its clicks are fitted to the game's timing, and the result says so (COARSE_INPUT is also listed there).
+    // click-between-frames) is fine (COARSE_INPUT is listed in the result). v0.3.1: the clicks are only moved when the Fit setting is on.
     int res = S().file->timing.clickResolution;
-    if (res > 1) G::notify("Clicks are only exact to " + std::to_string(res) + " ticks: the replay will fit them to the game");
+    if (res > 1) {
+        bool fit = Mod::get()->getSettingValue<bool>("fit-clicks");
+        G::notify("Clicks are only exact to " + std::to_string(res) + " ticks: " + (fit ? "the replay will fit them to the silent replay" : "they are replayed as recorded, nothing is moved"));
+    }
     go();
 }
 
@@ -427,7 +485,7 @@ protected:
 };
 
 // ---- the panel ------------------------------------------------------------------------------------------------------------------
-enum Tag { tRecord = 1, tStop, tPause, tAnalyze, tReplay, tEdit, tSave, tSaveAs, tLoad, tImport, tExport, tPitch };
+enum Tag { tRecord = 1, tStop, tPause, tAnalyze, tReplay, tEdit, tSave, tSaveAs, tLoad, tImport, tExport };
 class GdfwrPanel;
 GdfwrPanel* s_panel = nullptr;  // the open panel, cleared by its destructor
 
@@ -471,7 +529,7 @@ public:
         }
         if (s.file && !s.file->header.warnings.empty()) l[4] = "! " + G::describeCode(s.file->header.warnings[0].code) + (s.file->header.warnings.size() > 1 ? "  (+" + std::to_string(s.file->header.warnings.size() - 1) + " more)" : "");
         for (size_t i = 0; i < l.size(); i++) m_line[i]->setString(l[i].c_str());
-        for (auto& [tag, btn] : m_btn) if (tag != tPitch) btn->setNormalImage(spriteFor(tag));   // the blue ring never changes, it is always available
+        for (auto& [tag, btn] : m_btn) btn->setNormalImage(spriteFor(tag));
     }
 protected:
     bool init() {
@@ -487,7 +545,7 @@ protected:
         }
         struct Col { char const* title; float x; std::vector<int> tags; };
         std::vector<Col> cols = {{"Recorder", 0.17f, {tRecord, tStop, tPause}},
-                                 {"Analysis", 0.50f, {tAnalyze, tReplay, tEdit, tPitch}},   // v0.3.1: the 4th slot is the blue ring (ring sound pitch)
+                                 {"Analysis", 0.50f, {tAnalyze, tReplay, tEdit}},
                                  {"File", 0.83f, {tSave, tSaveAs, tLoad, tImport, tExport}}};
         for (auto& c : cols) {
             auto t = CCLabelBMFont::create(c.title, "goldFont.fnt");
@@ -522,7 +580,6 @@ protected:
                 return;
             }
             case tEdit: EditPopup::create()->show(); return;
-            case tPitch: openPitchPopup(); return;   // opens on top of the panel; nothing in the panel changes
             case tSave: doSave(false); break;
             case tSaveAs: doSave(true); break;
             case tLoad: pickFile(file::PickMode::OpenFile, "GDFWR recording", {".gdfwr"}, G::recordingsDir(), [](std::filesystem::path p) { ensureSaved([p] { loadFrom(p); }); }); break;
@@ -544,13 +601,10 @@ private:
             case tSaveAs: return "Save As";
             case tLoad: return "Load";
             case tImport: return "Import";
-            case tPitch: return "Ring pitch";
             default: return "Export";
         }
     }
-    CCNode* spriteFor(int tag) {
-        // the blue ring with its caption (resources/ring-button.png); every other button is a green (or, when off, grey) text button
-        if (tag == tPitch) return makeRingCaptionButtonSprite(CCDirector::get()->getWinSize().height * 0.09f, labelFor(tag).c_str());
+    ButtonSprite* spriteFor(int tag) {
         return ButtonSprite::create(labelFor(tag).c_str(), "bigFont.fnt", reasonFor(tag).empty() ? "GJ_button_01.png" : "GJ_button_04.png", .7f);
     }
     // Part 8, 8.3: the reason why a button is off (empty = enabled)
@@ -574,7 +628,6 @@ private:
             case tSave: case tSaveAs: case tExport: return rec ? "Stop recording first." : final ? "" : "No recording is open.";
             case tLoad: return rec ? "Stop recording first." : "";
             case tImport: return rec ? "Stop recording first." : pl ? "" : "Open the level first.";
-            case tPitch: return {};   // always available: the pitch is only a setting of the ring sound
         }
         return {};
     }

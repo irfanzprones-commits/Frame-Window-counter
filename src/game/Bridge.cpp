@@ -111,7 +111,10 @@ void stepTick(PlayLayer* pl) {
     }
     // The tick counter is the game's level time. If this build advances it somewhere else (not in the call above),
     // advance it here so that tickOf() still goes up by exactly one per step.
-    if (pl->m_gameState.m_levelTime < before + kStep * 0.5) pl->m_gameState.m_levelTime = before + kStep;
+    // v0.3.2: how far did the GAME'S OWN call move the clock? Counted for the report only (State::stepStats); the rule below is unchanged.
+    bool forced = pl->m_gameState.m_levelTime < before + kStep * 0.5;
+    S.stepStats.note((pl->m_gameState.m_levelTime - before) * double(gdfwr::kTps), forced);
+    if (forced) pl->m_gameState.m_levelTime = before + kStep;
     if (S.sim.dead) return;                              // a death in this tick wins over the end of the level
     if (S.stepMode == StepMode::Direct) pl->checkForEnd();  // the end test normally lives in postUpdate, which Direct does not run
 }

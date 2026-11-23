@@ -1,4 +1,6 @@
 // Standalone tests for the Geode-free core. Build: see tests/run.sh (no Geode needed).
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <functional>
@@ -10,6 +12,7 @@
 #include "core/Metrics.hpp"
 #include "core/Repair.hpp"
 #include "core/Session.hpp"
+#include "core/Trace.hpp"
 #include "core/Util.hpp"
 
 using namespace gdfwr;
@@ -518,57 +521,6 @@ TEST(replay_buckets_and_precision) {
     CHECK_EQ(formatPrecision(114.756), std::string("114.76"));
 }
 
-// ---- v0.3.1: ring sound pitch, and what a ring does ---------------------------------------------------------
-TEST(ring_pitch_table_clamp_keys) {
-    // the table the owner asked for, in percent of the normal speed: 1 = 40, 2 = 60, 3 = 80, 4 = 100 (normal), 5-6 = 120, then +20 per label
-    auto pitchOf = [](int window) { return defaultRingPitchPercent(replayBucket(window)); };
-    CHECK_EQ(pitchOf(1), 40); CHECK_EQ(pitchOf(2), 60); CHECK_EQ(pitchOf(3), 80); CHECK_EQ(pitchOf(4), 100);
-    CHECK_EQ(pitchOf(5), 120); CHECK_EQ(pitchOf(6), 120); CHECK_EQ(pitchOf(7), 140); CHECK_EQ(pitchOf(8), 140);
-    for (int w = 9; w <= 12; w++) CHECK_EQ(pitchOf(w), 160);
-    for (int w = 13; w <= 24; w++) CHECK_EQ(pitchOf(w), 180);
-    for (int w = 25; w <= 99; w++) CHECK_EQ(pitchOf(w), 200);
-    { int prev = 0; bool up = true; for (int w = 1; w <= 99; w++) { int p = pitchOf(w); up = up && p >= prev; prev = p; } CHECK(up); }   // a wider window never sounds lower
-    for (int i = 0; i < kReplayBucketCount; i++) {
-        int d = defaultRingPitchPercent(ReplayBucket(i));
-        CHECK(d >= kPitchMinPercent && d <= kPitchMaxPercent); CHECK_EQ(clampPitchPercent(d), d);
-        if (i > 0) CHECK(defaultRingPitchPercent(ReplayBucket(i - 1)) > d);                                   // HUD order: 25+ is the highest, 1 the lowest
-    }
-    CHECK_EQ(defaultRingPitchPercent(ReplayBucket::W25P), 200); CHECK_EQ(defaultRingPitchPercent(ReplayBucket::W1), 40);
-    // range 10..400 %, nothing outside it can be stored or played
-    CHECK_EQ(kPitchMinPercent, 10); CHECK_EQ(kPitchMaxPercent, 400);
-    CHECK_EQ(clampPitchPercent(10), 10); CHECK_EQ(clampPitchPercent(9), 10); CHECK_EQ(clampPitchPercent(0), 10); CHECK_EQ(clampPitchPercent(-50), 10);
-    CHECK_EQ(clampPitchPercent(400), 400); CHECK_EQ(clampPitchPercent(401), 400); CHECK_EQ(clampPitchPercent(2147483647), 400);
-    CHECK_EQ(clampPitchPercent(-2147483647 - 1), 10); CHECK_EQ(clampPitchPercent(123), 123);
-    // what the -10 / -1 / +1 / +10 buttons do at the two ends
-    CHECK_EQ(clampPitchPercent(15 - 10), 10); CHECK_EQ(clampPitchPercent(10 - 1), 10); CHECK_EQ(clampPitchPercent(395 + 10), 400); CHECK_EQ(clampPitchPercent(400 + 1), 400);
-    CHECK_EQ(clampPitchPercent(100 + 10), 110); CHECK_EQ(clampPitchPercent(100 - 1), 99);
-    // the factor given to the sound engine
-    CHECK(pitchSpeed(100) == 1.f); CHECK(std::abs(pitchSpeed(40) - 0.4f) < 1e-6f); CHECK(std::abs(pitchSpeed(200) - 2.f) < 1e-6f);
-    CHECK(std::abs(pitchSpeed(0) - 0.1f) < 1e-6f); CHECK(std::abs(pitchSpeed(100000) - 4.f) < 1e-6f);        // clamped first
-    // saved values: one key per bucket, 0 = 25+ ... 8 = 1, all different
-    CHECK_EQ(ringPitchKey(ReplayBucket::W25P), std::string("pitch-pct-0")); CHECK_EQ(ringPitchKey(ReplayBucket::W4), std::string("pitch-pct-5"));
-    CHECK_EQ(ringPitchKey(ReplayBucket::W1), std::string("pitch-pct-8"));
-    { std::set<std::string> keys; for (int i = 0; i < kReplayBucketCount; i++) keys.insert(ringPitchKey(ReplayBucket(i))); CHECK_EQ(keys.size(), size_t(kReplayBucketCount)); }
-}
-
-TEST(ring_look_any_is_invisible) {
-    ReplayRing measured; measured.known = true; measured.window = 4; measured.bucket = ReplayBucket::W4;
-    ReplayRing any; any.insensitive = true;                 // measured, but the release never mattered
-    ReplayRing unknown;                                     // "?": could not be measured
-    auto m = ringLook(measured), a = ringLook(any), u = ringLook(unknown);
-    CHECK(m.counted && m.visible && m.sound);
-    CHECK(!a.counted && !a.visible && !a.sound);            // v0.3.1: the grey "any" ring is not drawn and makes no sound
-    CHECK(!u.counted && u.visible && !u.sound);             // the grey "?" ring stays, silently
-    // end to end with a real plan: the "any" release of click 1 is invisible, the press of the same click is heard
-    GdfwrFile n = richFile(); n.analysis->clicks[0].out.releaseInsensitive = true;
-    auto plan = buildReplayPlan(n);
-    CHECK(plan.rings[1].insensitive); CHECK(!ringLook(plan.rings[1]).visible); CHECK(!ringLook(plan.rings[1]).sound);
-    CHECK(plan.rings[0].known); CHECK(ringLook(plan.rings[0]).visible); CHECK(ringLook(plan.rings[0]).sound); CHECK(ringLook(plan.rings[0]).counted);
-    // a plan without numbers (no analysis): every ring is a silent grey "?" and nothing is counted
-    GdfwrFile no = richFile(); no.analysis.reset(); no.header.verify = VerifyStatus::NotVerified;
-    for (auto const& r : buildReplayPlan(no).rings) { auto l = ringLook(r); CHECK(l.visible && !l.sound && !l.counted); }
-}
-
 
 // ---- v0.1.3: auto-repair of a failed verification -----------------------------------------------------
 TEST(repair_culprit_and_shifts) {
@@ -852,6 +804,572 @@ TEST(v2_tick_step_test) {
     CHECK(!tickStepLooksNormal(st * 0.5, 1.0)); CHECK(!tickStepLooksNormal(1.0 / 480.0, 1.0)); CHECK(!tickStepLooksNormal(1.0 / 360.0, 1.0));   // a real 480 / 360 TPS
     CHECK(!tickStepLooksNormal(0.0, 1.0)); CHECK(!tickStepLooksNormal(-st, 1.0)); CHECK(!tickStepLooksNormal(st * 3.0, 1.0));
     CHECK(!tickStepLooksNormal(st * 0.5, 0.0));                                                                                      // an invalid time warp is never an excuse
+}
+
+// ---- v0.3.2 (Phase 2): real playback against silent replay (src/core/Trace.*). MEASUREMENT only: these tests check the comparison and the text, not the game ----
+static Sample tsm(int t) {   // a made-up path of both players: x moves 5 per tick (two different ticks are never equal), y wobbles, yVel is some smooth number
+    float f = float(t);
+    Sample s;
+    s.x1 = 100.f + 5.f * f;
+    s.y1 = 105.f + 12.f * std::sin(0.07f * f);
+    s.vy1 = 0.84f * std::cos(0.07f * f);
+    s.x2 = 50.f + 5.f * f;
+    s.y2 = 305.f + 9.f * std::cos(0.05f * f);
+    s.vy2 = -0.45f * std::sin(0.05f * f);
+    return s;
+}
+static std::vector<Sample> tsmRun(int n) { std::vector<Sample> v; for (int t = 0; t < n; t++) v.push_back(tsm(t)); return v; }
+// The real game as the hook records it: one processCommands call per tick, `perFrame` calls per display frame (4 = a 60 FPS game at 240 TPS).
+static RealTrace traceOf(const std::vector<Sample>& v, int firstTick = 0, int perFrame = 4) {
+    RealTrace tr;
+    tr.begin(99, 4242, "Test Level", 6);
+    for (size_t i = 0; i < v.size(); i++) {
+        int t = firstTick + int(i);
+        int idx = tr.beginCall(t, double(t), 1.f / 240.f, 1.f, 0, v[i]);
+        tr.endCall(idx, double(t) + 1.0);
+        if ((int(i) + 1) % perFrame == 0) tr.noteFrame(1.f / 60.f);
+    }
+    return tr;
+}
+static bool anyLineHas(const std::vector<std::string>& v, std::string_view needle) {
+    for (const auto& l : v) if (l.find(needle) != std::string::npos) return true;
+    return false;
+}
+// the report lines are wrapped at 120 columns, so a phrase can run over two lines: search the text with the line breaks and the continuation indent folded into one space
+static bool textHas(const std::vector<std::string>& v, std::string_view needle) {
+    std::string all;
+    for (const auto& l : v) {
+        size_t a = l.find_first_not_of(' ');
+        if (!all.empty()) all += ' ';
+        if (a != std::string::npos) all += l.substr(a);
+    }
+    return all.find(needle) != std::string::npos;
+}
+
+TEST(trace_recording_rules) {
+    RealTrace tr;
+    CHECK_EQ(tr.beginCall(0, 0, 1.f / 240.f, 1.f, 0, Sample{}), -1);        // not recording: nothing is added
+    tr.noteFrame(0.016f);
+    CHECK(tr.frameDt.empty()); CHECK(!tr.any());
+    tr.begin(7, 1, "L", 3);
+    CHECK(tr.recording);
+    int a = tr.beginCall(5, 5.0, 1.f / 240.f, 1.f, TraceFlag::LastTick, tsm(5));
+    CHECK_EQ(a, 0);
+    tr.noteFed(a, 2, 3);
+    tr.endCall(a, 6.0);
+    CHECK_EQ(tr.calls[0].fedFirst, 2); CHECK_EQ(tr.calls[0].fedCount, uint16_t(3)); CHECK(tr.calls[0].clockAfter == 6.0);
+    CHECK_EQ(tr.calls[0].flags, uint8_t(TraceFlag::LastTick));
+    tr.noteFed(-1, 0, 1); tr.endCall(99, 1.0); tr.noteFed(a, 0, 0);          // bad index / nothing fed: ignored
+    CHECK_EQ(tr.calls[0].fedCount, uint16_t(3));
+    tr.finish(TraceEnd::Died);
+    CHECK(!tr.recording); CHECK(tr.end == TraceEnd::Died);
+    tr.finish(TraceEnd::Completed);
+    CHECK(tr.end == TraceEnd::Died);                                          // the first reason stays
+    CHECK_EQ(tr.beginCall(6, 6.0, 0.f, 1.f, 0, Sample{}), -1);                // finished: no more calls
+    tr.begin(8, 2, "M", 0);                                                   // begin() starts from scratch
+    CHECK(tr.calls.empty()); CHECK(tr.end == TraceEnd::Running); CHECK(tr.recording); CHECK_EQ(tr.macroHash, uint64_t(8)); CHECK(tr.levelName == "M");
+    RealTrace big;                                                            // the cap: the first part is kept and the trace says it was cut
+    big.begin(1, 1, "L", 0);
+    for (size_t i = 0; i < kTraceMaxCalls + 5; i++) big.beginCall(int(i % 1000), double(i % 1000), 0.f, 1.f, 0, Sample{});
+    CHECK_EQ(big.calls.size(), kTraceMaxCalls); CHECK(big.truncated);
+    for (auto e : {TraceEnd::Running, TraceEnd::Completed, TraceEnd::Died, TraceEnd::Left, TraceEnd::Analyze}) CHECK(traceEndText(e)[0] != 0);
+}
+
+TEST(trace_tick_series_and_stats) {
+    RealTrace tr;
+    tr.begin(1, 1, "L", 0);
+    struct C { int tick; double clock, after; uint8_t fl; };
+    // ticks 0..9: tick 4 is called twice (the game's call did not move the clock the first time), tick 7 is never called, tick 9 is a half-tick call
+    std::vector<C> cs = {{0, 0, 1, 0}, {1, 1, 2, 0}, {2, 2, 3, 0}, {3, 3, 4, 0}, {4, 4, 4, 0}, {4, 4, 5, TraceFlag::LastTick}, {5, 5, 6, 0},
+                         {6, 6, 7, 0}, {8, 8, 9, 0}, {9, 9, 10, TraceFlag::HalfTick}};
+    for (size_t i = 0; i < cs.size(); i++) {
+        Sample s = tsm(cs[i].tick);
+        if (i == 5) s.y1 += 50.f;                                             // the second call of tick 4 must not replace the first one
+        int idx = tr.beginCall(cs[i].tick, cs[i].clock, 1.f / 240.f, 1.f, cs[i].fl, s);
+        tr.endCall(idx, cs[i].after);
+        if (i % 5 == 4) tr.noteFrame(1.f / 60.f);
+    }
+    auto ts = tickSeries(tr);
+    CHECK_EQ(ts.size(), 10); CHECK(ts.has(4)); CHECK(!ts.has(7)); CHECK(!ts.has(10)); CHECK(!ts.has(-1));
+    CHECK_EQ(ts.ticksWithData(), 9); CHECK_EQ(ts.count[4], uint16_t(2)); CHECK_EQ(ts.call[4], 4); CHECK_EQ(ts.call[8], 8);
+    CHECK(!sampleDiffers(ts.s[4], tsm(4), 0.f));
+    auto st = traceStats(tr);
+    CHECK_EQ(st.calls, size_t(10)); CHECK_EQ(st.firstTick, 0); CHECK_EQ(st.lastTick, 9); CHECK_EQ(st.ticksSeen, 9); CHECK_EQ(st.skippedTicks, 1);
+    CHECK_EQ(st.repeatedCalls, 1); CHECK_EQ(st.backwards, 0); CHECK_EQ(st.wild, 0); CHECK_EQ(st.halfCalls, size_t(1)); CHECK_EQ(st.lastCalls, size_t(1));
+    CHECK_EQ(st.clockInside1, size_t(9)); CHECK_EQ(st.clockInsideNone, size_t(1)); CHECK_EQ(st.clockInsideHalf, size_t(0)); CHECK_EQ(st.clockInsideOther, size_t(0));
+    CHECK_EQ(st.stepPairs, size_t(9)); CHECK_EQ(st.stepNormal, size_t(7)); CHECK(st.stepMedian == 1.0); CHECK(st.stepMin == 0.0); CHECK(st.stepMax == 2.0);
+    CHECK(std::fabs(st.tps - 240.0) < 1e-9);
+    CHECK_EQ(st.frames, size_t(2)); CHECK(std::fabs(st.fpsAvg - 60.0) < 1e-3); CHECK(std::fabs(st.fpsMin - 60.0) < 1e-3);
+    CHECK_EQ(st.stepsPerFrame.size(), size_t(1)); CHECK_EQ(st.stepsPerFrame[0].first, 5); CHECK_EQ(st.stepsPerFrame[0].second, 2);
+    // strange calls are counted and never become a tick of the series
+    tr.beginCall(3, 3.0, 1.f / 240.f, 1.f, 0, tsm(3));                        // goes back
+    tr.beginCall(kTraceMaxTick + 10, 1e9, 1.f / 240.f, 1.f, 0, tsm(3));       // out of range
+    tr.beginCall(10, 10.4, 1.f / 240.f, 0.5f, 0, tsm(10));                    // a clock that is not on a whole tick, time warp 0.5
+    auto ts2 = tickSeries(tr);
+    CHECK_EQ(ts2.size(), 11); CHECK(ts2.has(10));
+    auto st2 = traceStats(tr);
+    CHECK_EQ(st2.backwards, 1); CHECK_EQ(st2.wild, 1);                         // the wild call is counted once: it is not the "tick before" the next call
+    CHECK_EQ(st2.fractional, size_t(1)); CHECK(st2.twMin == 0.5f); CHECK(st2.twMax == 1.f);
+    RealTrace none; none.begin(1, 1, "L", 0);
+    CHECK_EQ(tickSeries(none).size(), 0); CHECK_EQ(traceStats(none).calls, size_t(0));
+    // 4 calls per display frame, 120 ticks: the partial first and last frame are not counted in the histogram
+    auto tr4 = traceOf(tsmRun(120));
+    auto s4 = traceStats(tr4);
+    CHECK_EQ(s4.stepsPerFrame.size(), size_t(1)); CHECK_EQ(s4.stepsPerFrame[0].first, 4); CHECK_EQ(s4.stepsPerFrame[0].second, 28);
+    CHECK(std::fabs(s4.fpsAvg - 60.0) < 1e-3); CHECK(std::fabs(s4.tps - 240.0) < 1e-9);
+    // one step per frame (a 240 FPS game) and a 30 FPS game (8 steps)
+    CHECK_EQ(traceStats(traceOf(tsmRun(100), 0, 1)).stepsPerFrame[0].first, 1);
+    CHECK_EQ(traceStats(traceOf(tsmRun(100), 0, 8)).stepsPerFrame[0].first, 8);
+}
+
+TEST(trace_compare_identical) {
+    auto base = tsmRun(300);
+    auto tr = traceOf(base);
+    auto c = compareSamples(base, tickSeries(tr));
+    CHECK(c.ok); CHECK(c.verdict == TraceVerdict::Identical);
+    CHECK_EQ(c.compared, 300); CHECK_EQ(c.firstOver, -1); CHECK_EQ(c.firstAny, -1); CHECK_EQ(c.overCount, 0); CHECK_EQ(c.missingReal, 0);
+    CHECK_EQ(c.shifts.size(), size_t(7)); CHECK_EQ(c.shifts[0].k, -3); CHECK_EQ(c.shifts[3].k, 0); CHECK_EQ(c.shifts[6].k, 3);
+    CHECK_EQ(c.shifts[3].matched, 300); CHECK_EQ(c.shifts[3].runLen, 300); CHECK_EQ(c.shifts[3].runStart, 0); CHECK_EQ(c.shifts[3].firstMismatch, -1);
+    CHECK_EQ(c.shifts[4].matched, 0);                                          // k=+1: nothing equal (x moves every tick)
+    CHECK_EQ(c.bestK, 0); CHECK(!c.deathKnown);
+    // below the limit: reported as "a difference of any size", but it is not a difference
+    auto sim = base;
+    sim[120].y1 += 5e-5f;
+    auto c2 = compareSamples(sim, tickSeries(tr));
+    CHECK(c2.verdict == TraceVerdict::Identical); CHECK_EQ(c2.firstAny, 120); CHECK_EQ(c2.firstOver, -1); CHECK_EQ(c2.overCount, 0);
+    // every value counts: yVel of player 2 alone is enough
+    sim = base;
+    sim[77].vy2 += 0.01f;
+    auto c3 = compareSamples(sim, tickSeries(tr));
+    CHECK_EQ(c3.firstOver, 77); CHECK_EQ(c3.overCount, 1);
+    CHECK(c3.simAt.vy2 == sim[77].vy2); CHECK(c3.realAt.vy2 == base[77].vy2);
+    // a NaN is never "the same"
+    sim = base;
+    sim[10].x1 = std::nanf("");
+    CHECK_EQ(compareSamples(sim, tickSeries(tr)).firstOver, 10);
+    // a different epsilon
+    sim = base;
+    sim[30].y1 += 0.01f;
+    CHECK_EQ(compareSamples(sim, tickSeries(tr), 0.1f).firstOver, -1); CHECK_EQ(compareSamples(sim, tickSeries(tr), 1e-3f).firstOver, 30);
+}
+
+TEST(trace_compare_first_difference) {
+    auto base = tsmRun(400);
+    auto tr = traceOf(base);
+    auto sim = base;
+    for (int t = 250; t < 400; t++) { sim[size_t(t)].y1 += 3.f + 0.1f * float(t - 250); sim[size_t(t)].vy1 -= 0.5f; }   // a different jump from tick 250 on
+    sim[100].vy2 += 4e-4f;                                                     // noise below the limit
+    auto c = compareSamples(sim, tickSeries(tr));
+    CHECK(c.ok); CHECK_EQ(c.firstOver, 250); CHECK_EQ(c.firstAny, 100); CHECK_EQ(c.overCount, 150); CHECK_EQ(c.compared, 400);
+    CHECK(c.simAt.y1 == sim[250].y1); CHECK(c.realAt.y1 == base[250].y1); CHECK(c.simAt.vy1 == sim[250].vy1);
+    CHECK(c.verdict == TraceVerdict::NotAShift);                               // x moves 5 per tick: no k explains a different y
+    CHECK_EQ(c.shifts[3].firstMismatch, 250); CHECK_EQ(c.shifts[3].matched, 250); CHECK_EQ(c.shifts[3].tailMatched, 0); CHECK_EQ(c.shifts[3].tailCompared, 150);
+    CHECK_EQ(c.bestK, 0);
+    // a single bad tick in the middle is a one-off, and is said to be one
+    sim = base;
+    sim[120].y1 += 0.01f;
+    auto b = compareSamples(sim, tickSeries(tr));
+    CHECK_EQ(b.firstOver, 120); CHECK_EQ(b.overCount, 1); CHECK(b.verdict == TraceVerdict::NotAShift);
+    // too few ticks after the first difference to tell a shifted clock from different physics (the silent replay ended there)
+    std::vector<Sample> shortSim(base.begin(), base.begin() + 203);
+    for (int t = 200; t < 203; t++) shortSim[size_t(t)].y1 += 5.f;
+    auto s3 = compareSamples(shortSim, tickSeries(tr));
+    CHECK_EQ(s3.firstOver, 200); CHECK(s3.verdict == TraceVerdict::TooShortToTell); CHECK_EQ(s3.shifts[3].tailCompared, 3);
+    shortSim = std::vector<Sample>(base.begin(), base.begin() + 204);
+    for (int t = 200; t < 204; t++) shortSim[size_t(t)].y1 += 5.f;
+    CHECK(compareSamples(shortSim, tickSeries(tr)).verdict == TraceVerdict::NotAShift);   // 4 ticks follow: enough to judge
+    // the silent replay is longer than the real trace: the extra ticks are not compared
+    auto longSim = tsmRun(500);
+    auto lc = compareSamples(longSim, tickSeries(tr));
+    CHECK(lc.ok); CHECK_EQ(lc.simBeyondReal, 100); CHECK_EQ(lc.compared, 400); CHECK(lc.verdict == TraceVerdict::Identical);
+}
+
+TEST(trace_compare_shifts) {
+    auto base = tsmRun(420);
+    auto tr = traceOf(base);
+    // silent[t] == real[t + k] over the whole run: k > 0 = the silent replay is AHEAD of the real game
+    for (int k : {1, 2, 3, -1, -2, -3}) {
+        std::vector<Sample> sim;
+        for (int t = 0; t < 400; t++) sim.push_back(base[size_t(std::max(0, t + k))]);
+        auto c = compareSamples(sim, tickSeries(tr));
+        CHECK(c.ok); CHECK(c.verdict == TraceVerdict::ShiftedWhole); CHECK_EQ(c.verdictK, k); CHECK_EQ(c.bestK, k);
+        const auto& sh = c.shifts[size_t(k + kTraceMaxShift)];
+        CHECK_EQ(sh.k, k); CHECK_EQ(sh.matched, sh.compared); CHECK(sh.compared >= 396); CHECK_EQ(sh.firstMismatch, -1);
+        CHECK(c.firstOver >= 0 && c.firstOver <= 1);                           // different from the first ticks on
+    }
+    // equal until tick 200, then one tick LOST (the silent replay is one tick ahead from there on)
+    std::vector<Sample> sim;
+    for (int t = 0; t < 400; t++) sim.push_back(t < 200 ? base[size_t(t)] : base[size_t(t + 1)]);
+    auto c = compareSamples(sim, tickSeries(tr));
+    CHECK(c.verdict == TraceVerdict::ShiftedFromFirstDiff); CHECK_EQ(c.verdictK, 1); CHECK_EQ(c.firstOver, 200); CHECK_EQ(c.bestK, 0);
+    CHECK_EQ(c.shifts[4].tailMatched, 200); CHECK_EQ(c.shifts[4].tailCompared, 200); CHECK_EQ(c.shifts[3].matched, 200);
+    // equal until tick 200, then one tick GAINED (behind from there on)
+    sim.clear();
+    for (int t = 0; t < 400; t++) sim.push_back(t < 200 ? base[size_t(t)] : base[size_t(t - 1)]);
+    c = compareSamples(sim, tickSeries(tr));
+    CHECK(c.verdict == TraceVerdict::ShiftedFromFirstDiff); CHECK_EQ(c.verdictK, -1); CHECK_EQ(c.firstOver, 200);
+    // a shift of 5 ticks is outside the test range: not a shift
+    sim.clear();
+    for (int t = 0; t < 400; t++) sim.push_back(base[size_t(t + 5)]);
+    CHECK(compareSamples(sim, tickSeries(tr)).verdict == TraceVerdict::NotAShift);
+}
+
+// v0.3.2: a click that takes effect k ticks later in one run than in the other. x stays in step, only the jump is shifted: the whole-state test cannot
+// find a k (x moves every tick), the vertical-only test (y, yVel; x ignored) can.
+static std::vector<Sample> jumpRun(int n, const std::vector<int>& presses, int lag) {
+    std::vector<Sample> v;
+    for (int t = 0; t < n; t++) {
+        Sample s;
+        s.x1 = float(t);
+        int last = -1000;
+        for (int p : presses) if (p + lag < t) last = p + lag;                 // a press counts from the next tick on
+        s.y1 = float(std::min(t - last, 20));
+        s.vy1 = (t - last < 20) ? 1.f : 0.f;
+        v.push_back(s);
+    }
+    return v;
+}
+
+TEST(trace_compare_vertical_shift) {
+    // the real run takes every press 3 ticks later than the silent one: silent[t] == real[t + 3] for y and yVel, never for x
+    auto sim = jumpRun(400, {50, 200}, 0);
+    auto tr = traceOf(jumpRun(400, {50, 200}, 3));
+    auto c = compareSamples(sim, tickSeries(tr));
+    CHECK(c.ok); CHECK_EQ(c.firstOver, 51); CHECK_EQ(c.vFirstOver, 51); CHECK_EQ(c.xFirstOver, -1);       // x is equal at k = 0 at every tick
+    CHECK(c.verdict == TraceVerdict::NotAShift);                                                            // the whole state: no k (x moves every tick)
+    CHECK(c.vverdict == TraceVerdict::ShiftedWhole); CHECK_EQ(c.vverdictK, 3); CHECK_EQ(c.vbestK, 3);
+    CHECK_EQ(c.vshifts.size(), size_t(7)); CHECK_EQ(c.vshifts[6].k, 3); CHECK_EQ(c.vshifts[6].matched, c.vshifts[6].compared); CHECK_EQ(c.vshifts[6].compared, 397);
+    CHECK_EQ(c.shifts[6].matched, 0);                                                                        // the whole-state table is unchanged by the new test
+    // the other direction: the silent run takes the presses 2 ticks later
+    auto c2 = compareSamples(jumpRun(400, {50, 200}, 2), tickSeries(traceOf(jumpRun(400, {50, 200}, 0))));
+    CHECK(c2.vverdict == TraceVerdict::ShiftedWhole); CHECK_EQ(c2.vverdictK, -2); CHECK(c2.verdict == TraceVerdict::NotAShift);
+    // only the SECOND press is late (equal until tick 200): shifted from the first difference on, and the first jump is equal at k = 0
+    auto c3 = compareSamples(jumpRun(400, {50, 200}, 0), tickSeries(traceOf(jumpRun(400, {50, 203}, 0))));
+    CHECK_EQ(c3.firstOver, 201); CHECK_EQ(c3.vFirstOver, 201); CHECK(c3.vverdict == TraceVerdict::ShiftedFromFirstDiff); CHECK_EQ(c3.vverdictK, 3);
+    CHECK(c3.verdict == TraceVerdict::NotAShift);
+    // x differs, y and yVel never: "only x differs"
+    auto simX = jumpRun(300, {50}, 0);
+    auto realX = jumpRun(300, {50}, 0);
+    for (int t = 100; t < 300; t++) realX[size_t(t)].x1 += 0.5f;               // (an offset of 2 would be a shift of 2 ticks: x moves 1 per tick)
+    auto c4 = compareSamples(simX, tickSeries(traceOf(realX)));
+    CHECK_EQ(c4.firstOver, 100); CHECK_EQ(c4.xFirstOver, 100); CHECK_EQ(c4.vFirstOver, -1); CHECK(c4.vverdict == TraceVerdict::Identical); CHECK(c4.verdict == TraceVerdict::NotAShift);
+    // a different jump (not the same path, only later): no k explains it, in either test
+    auto simD = jumpRun(300, {50}, 0);
+    auto realD = jumpRun(300, {50}, 3);
+    for (int t = 60; t < 120; t++) realD[size_t(t)].y1 += 7.f * float((t % 5) + 1);                         // the real jump is bumpy
+    auto c5 = compareSamples(simD, tickSeries(traceOf(realD)));
+    CHECK(c5.vverdict == TraceVerdict::NotAShift); CHECK(c5.verdict == TraceVerdict::NotAShift);
+    // identical runs: nothing to explain, in both tests
+    auto c6 = compareSamples(sim, tickSeries(traceOf(sim)));
+    CHECK(c6.verdict == TraceVerdict::Identical); CHECK(c6.vverdict == TraceVerdict::Identical); CHECK_EQ(c6.vFirstOver, -1); CHECK_EQ(c6.xFirstOver, -1);
+    // a whole-state shift is a vertical shift too, but the report only needs the whole-state explanation
+    auto base = tsmRun(420);
+    std::vector<Sample> simS;
+    for (int t = 0; t < 400; t++) simS.push_back(base[size_t(t + 2)]);
+    auto c7 = compareSamples(simS, tickSeries(traceOf(base)));
+    CHECK(c7.verdict == TraceVerdict::ShiftedWhole); CHECK_EQ(c7.verdictK, 2);
+    // with no comparison possible the vertical table is still 7 entries long, and empty
+    auto c8 = compareSamples({}, tickSeries(RealTrace{}));
+    CHECK(!c8.ok); CHECK_EQ(c8.vshifts.size(), size_t(7)); CHECK_EQ(c8.vshifts[0].compared, 0);
+    // the helper itself: x is ignored, both players count
+    Sample a{1.f, 2.f, 3.f, 4.f, 5.f, 6.f}, b = a;
+    b.x1 += 9.f; b.x2 -= 9.f;
+    CHECK(!verticalDiffers(a, b, 1e-3f)); CHECK(sampleDiffers(a, b, 1e-3f));
+    b = a; b.vy2 += 0.5f;
+    CHECK(verticalDiffers(a, b, 1e-3f));
+    b = a; b.y1 = std::nanf("");
+    CHECK(verticalDiffers(a, b, 1e-3f));
+}
+
+TEST(trace_report_vertical_shift) {
+    GdfwrFile f = fileFromActions({{50, 0, 1}, {80, 0, 0}, {200, 0, 1}, {230, 0, 0}}, 400);
+    auto ev = finalRunEvents(f.macro);
+    auto sim = jumpRun(400, {50, 200}, 0);
+    auto real = jumpRun(400, {50, 200}, 3);
+    RealTrace tr;
+    tr.begin(f.macro.macroHash, 4242, "Test Level", ev.size());
+    for (int t = 0; t < 400; t++) {
+        int idx = tr.beginCall(t, double(t), 1.f / 240.f, 1.f, TraceFlag::LastTick, real[size_t(t)]);
+        tr.endCall(idx, double(t) + 1.0);
+        if (t % 4 == 3) tr.noteFrame(1.f / 60.f);
+    }
+    tr.finish(TraceEnd::Completed);
+    TraceInput in;
+    in.real = &tr; in.macro = &f.macro; in.modVersion = "0.3.2";
+    in.file.levelName = "Test Level"; in.file.levelId = 4242; in.file.inputs = 4; in.file.tps = 240;
+    in.sim.samples = sim; in.sim.endTick = 399; in.sim.stepMode = "Direct";
+    auto R = buildTraceReport(in);
+    CHECK(R.compared); CHECK(R.cmp.verdict == TraceVerdict::NotAShift); CHECK(R.cmp.vverdict == TraceVerdict::ShiftedWhole);
+    CHECK(anyLineHas(R.popup, "RESULT: NOT a tick shift")); CHECK(textHas(R.popup, "makes the whole state (x, y, yVel) equal"));
+    CHECK(textHas(R.popup, "VERTICAL ONLY (y and yVel; x ignored)")); CHECK(textHas(R.popup, "SHIFTED by k=+3 (silent[t] == real[t+3]) over the whole run"));
+    CHECK(textHas(R.popup, "x is equal at every compared tick")); CHECK(textHas(R.popup, "EARLIER in the silent replay than in the real playback"));
+    CHECK(textHas(R.popup, "suspected, not proven"));
+    CHECK(!textHas(R.popup, "differ in more than timing"));                 // the vertical shift explains it: that sentence would contradict it
+    CHECK(anyLineHas(R.result, "Vertical-only shift test")); CHECK(anyLineHas(R.log, "Vertical-only shift test"));
+    int vlines = 0;
+    for (const auto& l : R.log) if (l.rfind("  k=+3: 397 of 397 ticks equal", 0) == 0) vlines++;
+    CHECK_EQ(vlines, 1);                                                       // only the vertical table has a perfect row at k=+3
+    CHECK(anyLineHas(R.log, "vertical only (y, yVel; x ignored): best shift in this window k=+3"));   // the per-click windows say it too
+    CHECK(anyLineHas(R.log, "click #1 (P1): press 50"));
+    // the real run takes the presses EARLIER (k < 0): "LATER in the silent replay"
+    in.sim.samples = jumpRun(400, {50, 200}, 2);
+    RealTrace tr2;
+    tr2.begin(f.macro.macroHash, 4242, "Test Level", ev.size());
+    for (int t = 0; t < 400; t++) { int idx = tr2.beginCall(t, double(t), 1.f / 240.f, 1.f, 0, jumpRun(400, {50, 200}, 0)[size_t(t)]); tr2.endCall(idx, double(t) + 1.0); }
+    in.real = &tr2;
+    auto R2 = buildTraceReport(in);
+    CHECK(R2.cmp.vverdict == TraceVerdict::ShiftedWhole); CHECK_EQ(R2.cmp.vverdictK, -2);
+    CHECK(textHas(R2.popup, "SHIFTED by k=-2")); CHECK(textHas(R2.popup, "LATER in the silent replay than in the real playback"));
+    // only the second press is late: "equal until tick 200"
+    in.sim.samples = jumpRun(400, {50, 200}, 0);
+    RealTrace tr3;
+    tr3.begin(f.macro.macroHash, 4242, "Test Level", ev.size());
+    auto r3 = jumpRun(400, {50, 203}, 0);
+    for (int t = 0; t < 400; t++) { int idx = tr3.beginCall(t, double(t), 1.f / 240.f, 1.f, 0, r3[size_t(t)]); tr3.endCall(idx, double(t) + 1.0); }
+    in.real = &tr3;
+    auto R3 = buildTraceReport(in);
+    CHECK(R3.cmp.vverdict == TraceVerdict::ShiftedFromFirstDiff);
+    CHECK(textHas(R3.popup, "equal until tick 200; from tick 201 on the vertical movement")); CHECK(textHas(R3.popup, "SHIFTED by k=+3"));
+    // only x differs
+    auto rx = jumpRun(400, {50, 200}, 0);
+    for (int t = 100; t < 400; t++) rx[size_t(t)].x1 += 0.5f;
+    RealTrace tr4;
+    tr4.begin(f.macro.macroHash, 4242, "Test Level", ev.size());
+    for (int t = 0; t < 400; t++) { int idx = tr4.beginCall(t, double(t), 1.f / 240.f, 1.f, 0, rx[size_t(t)]); tr4.endCall(idx, double(t) + 1.0); }
+    in.real = &tr4;
+    auto R4 = buildTraceReport(in);
+    CHECK(R4.cmp.vverdict == TraceVerdict::Identical); CHECK(textHas(R4.popup, "no difference at any compared tick - only x differs (first at tick 100)"));
+    // nothing explains it in either test: the old sentence (different frame structure or physics) is back, and it is still marked as a suspicion
+    auto rd = jumpRun(400, {50, 200}, 3);
+    for (int t = 60; t < 120; t++) rd[size_t(t)].y1 += 7.f * float((t % 5) + 1);
+    RealTrace tr5;
+    tr5.begin(f.macro.macroHash, 4242, "Test Level", ev.size());
+    for (int t = 0; t < 400; t++) { int idx = tr5.beginCall(t, double(t), 1.f / 240.f, 1.f, 0, rd[size_t(t)]); tr5.endCall(idx, double(t) + 1.0); }
+    in.real = &tr5;
+    auto R5 = buildTraceReport(in);
+    CHECK(R5.cmp.vverdict == TraceVerdict::NotAShift);
+    CHECK(textHas(R5.popup, "no shift in -3..+3 explains it either")); CHECK(textHas(R5.popup, "differ in more than timing")); CHECK(textHas(R5.popup, "suspected, not proven"));
+    // one-off differences and identical runs get no vertical paragraph
+    in.real = &tr;
+    in.sim.samples = real;
+    auto R6 = buildTraceReport(in);
+    CHECK(R6.cmp.verdict == TraceVerdict::Identical); CHECK(!anyLineHas(R6.popup, "VERTICAL ONLY")); CHECK(!anyLineHas(R6.popup, "Vertical only"));
+}
+
+TEST(trace_compare_death_inside_a_step) {
+    auto base = tsmRun(400);
+    auto tr = traceOf(base);
+    std::vector<Sample> sim(base.begin(), base.begin() + 301);                 // ticks 0..300: the silent replay died DURING tick 300
+    auto c = compareSamples(sim, tickSeries(tr), kTraceEpsilon, 300, &base[301]);
+    CHECK(c.verdict == TraceVerdict::Identical);                               // every tick STARTS in the same state ...
+    CHECK(c.deathKnown); CHECK_EQ(c.deathTick, 300); CHECK(c.deathRealHave); CHECK(c.realContinued); CHECK(c.deathEqual);   // ... and even the dying step moves the same
+    Sample moved = base[301];
+    moved.y1 += 2.f;
+    c = compareSamples(sim, tickSeries(tr), kTraceEpsilon, 300, &moved);
+    CHECK(c.deathKnown); CHECK(c.deathRealHave); CHECK(!c.deathEqual);        // the movement of that step already differs
+    CHECK(c.deathReal.y1 == base[301].y1); CHECK(c.deathSim.y1 == moved.y1);
+    auto shortTr = traceOf(std::vector<Sample>(base.begin(), base.begin() + 301));   // the real run has no tick 301 either
+    c = compareSamples(sim, tickSeries(shortTr), kTraceEpsilon, 300, &base[301]);
+    CHECK(c.deathKnown); CHECK(!c.deathRealHave); CHECK(!c.realContinued);
+    c = compareSamples(sim, tickSeries(tr), kTraceEpsilon, 300, nullptr);      // no sample after the dying step: nothing to say
+    CHECK(!c.deathKnown);
+    c = compareSamples(sim, tickSeries(tr), kTraceEpsilon, -1, &base[301]);    // did not die
+    CHECK(!c.deathKnown);
+}
+
+TEST(trace_compare_gaps_and_no_data) {
+    auto base = tsmRun(200);
+    RealTrace tr;
+    tr.begin(1, 1, "L", 0);
+    for (int t = 0; t < 200; t++) if (t != 50 && t != 51 && t != 120) tr.beginCall(t, double(t), 1.f / 240.f, 1.f, 0, base[size_t(t)]);
+    auto c = compareSamples(base, tickSeries(tr));
+    CHECK(c.ok); CHECK_EQ(c.missingReal, 3); CHECK_EQ(c.compared, 197); CHECK(c.verdict == TraceVerdict::Identical);
+    auto none = compareSamples(std::vector<Sample>{}, tickSeries(tr));
+    CHECK(!none.ok); CHECK(!none.why.empty()); CHECK(none.verdict == TraceVerdict::NoData);
+    RealTrace empty;
+    empty.begin(1, 1, "L", 0);
+    CHECK(!compareSamples(base, tickSeries(empty)).ok);
+    auto late = traceOf(tsmRun(50), 500);                                      // the real trace starts at tick 500: no tick in common
+    auto lc = compareSamples(base, tickSeries(late));
+    CHECK(!lc.ok); CHECK(!lc.why.empty());
+}
+
+TEST(trace_click_facts) {
+    GdfwrFile f = fileFromActions({{100, 0, 1}, {140, 0, 0}, {250, 1, 1}, {270, 1, 0}, {300, 0, 1}, {360, 0, 0}, {500, 0, 1}, {520, 0, 0}}, 700);
+    auto ev = finalRunEvents(f.macro);
+    CHECK_EQ(ev.size(), size_t(8));
+    auto base = tsmRun(700);
+    // the real playback feeds the inputs with editedTick <= tick (feedReplay). The call at tick 300 never happens, so the press of 300 is applied at 301.
+    RealTrace tr;
+    tr.begin(f.macro.macroHash, 1, "L", ev.size());
+    size_t next = 0;
+    for (int t = 0; t < 700; t++) {
+        if (t == 300) continue;
+        int idx = tr.beginCall(t, double(t), 1.f / 240.f, 1.f, t == 301 ? TraceFlag::LastTick : 0, base[size_t(t)]);
+        int first = int(next), n = 0;
+        while (next < ev.size() && ev[next].editedTick <= t) { next++; n++; }
+        if (n) tr.noteFed(idx, first, n);
+        tr.endCall(idx, double(t) + 1.0);
+        if (t % 4 == 3) tr.noteFrame(1.f / 60.f);
+    }
+    auto series = tickSeries(tr);
+    auto sim = base;
+    for (int t = 302; t < 330; t++) sim[size_t(t)].y1 += 2.f;                  // the silent replay differs for a while after the late press
+    auto facts = nearestClickFacts(f.macro, sim, series, tr, 310);
+    CHECK_EQ(facts.size(), size_t(4));
+    CHECK_EQ(facts[0].player, 0); CHECK_EQ(facts[0].number, 2); CHECK_EQ(facts[0].distance, 0);      // the player holds the second P1 click at tick 310
+    CHECK_EQ(facts[1].player, 1); CHECK_EQ(facts[1].number, 1); CHECK_EQ(facts[1].distance, 40);     // P2 released at 270
+    CHECK_EQ(facts[2].player, 0); CHECK_EQ(facts[2].number, 1); CHECK_EQ(facts[2].distance, 170);    // P1 released at 140
+    CHECK_EQ(facts[3].player, 0); CHECK_EQ(facts[3].number, 3); CHECK_EQ(facts[3].distance, 190);    // P1 presses at 500
+    const auto& p = facts[0].press;
+    CHECK_EQ(facts[0].pressTick, 300); CHECK(facts[0].hasRelease); CHECK_EQ(facts[0].releaseTick, 360);
+    CHECK_EQ(p.tick, 300); CHECK(p.press); CHECK(p.realApplied); CHECK_EQ(p.realTick, 301); CHECK_EQ(p.realFlags, uint8_t(TraceFlag::LastTick));   // one tick late
+    CHECK(p.callsAround.find("301(L f75 +1)") != std::string::npos);
+    CHECK(p.callsAround.find("299(") != std::string::npos);
+    CHECK_EQ(p.local.lo, 297); CHECK_EQ(p.local.hi, 312); CHECK_EQ(p.local.firstOver, 302); CHECK(p.local.simAt.y1 == sim[302].y1); CHECK(p.local.realAt.y1 == base[302].y1);
+    const auto& r = facts[0].release;
+    CHECK(!r.press); CHECK_EQ(r.tick, 360); CHECK(r.realApplied); CHECK_EQ(r.realTick, 360);
+    CHECK_EQ(r.local.firstOver, -1); CHECK_EQ(r.local.compared, 16); CHECK_EQ(r.local.bestK, 0);      // after tick 330 the two are equal again
+    CHECK_EQ(facts[1].press.realTick, 250);
+    // the limit, and a reference after the last click
+    CHECK_EQ(nearestClickFacts(f.macro, sim, series, tr, 310, 2).size(), size_t(2));
+    auto late = nearestClickFacts(f.macro, sim, series, tr, 690, 1);
+    CHECK_EQ(late.size(), size_t(1)); CHECK_EQ(late[0].number, 3); CHECK_EQ(late[0].distance, 170);
+    // an input that no call applied
+    RealTrace tr2;
+    tr2.begin(1, 1, "L", 8);
+    for (int t = 0; t < 200; t++) tr2.beginCall(t, double(t), 1.f / 240.f, 1.f, 0, base[size_t(t)]);
+    auto f2 = nearestClickFacts(f.macro, base, tickSeries(tr2), tr2, 120, 1);
+    CHECK_EQ(f2.size(), size_t(1)); CHECK(!f2[0].press.realApplied); CHECK_EQ(f2[0].press.realTick, -1);
+}
+
+TEST(trace_report_text) {
+    GdfwrFile f = fileFromActions({{100, 0, 1}, {140, 0, 0}, {300, 0, 1}, {360, 0, 0}}, 700);
+    auto ev = finalRunEvents(f.macro);
+    auto base = tsmRun(700);
+    RealTrace tr;
+    tr.begin(f.macro.macroHash, 4242, "Test Level", ev.size());
+    size_t next = 0;
+    for (int t = 0; t < 700; t++) {
+        if (t == 300) continue;                                                // the press of tick 300 is applied at 301 in the real playback
+        int idx = tr.beginCall(t, double(t), 1.f / 240.f, 1.f, 0, base[size_t(t)]);
+        int first = int(next), n = 0;
+        while (next < ev.size() && ev[next].editedTick <= t) { next++; n++; }
+        if (n) tr.noteFed(idx, first, n);
+        tr.endCall(idx, double(t) + 1.0);
+        if (t % 4 == 3) tr.noteFrame(1.f / 60.f);
+    }
+    tr.finish(TraceEnd::Completed);
+    TraceInput in;
+    in.real = &tr;
+    in.macro = &f.macro;
+    in.modVersion = "0.3.2";
+    in.file.levelName = "Test Level"; in.file.levelId = 4242; in.file.inputs = 4; in.file.twoPlayer = false; in.file.tps = 240; in.file.fpsAvg = 59.5f; in.file.fpsMin = 31.f;
+    in.sim.samples = base;
+    in.sim.samples.resize(331);                                                // the silent replay died during tick 330
+    for (int t = 302; t <= 330; t++) in.sim.samples[size_t(t)].y1 += 2.f;
+    in.sim.died = true; in.sim.deathTick = 330; in.sim.hasDeathSample = true; in.sim.deathSample = base[331]; in.sim.killer = "Killed by: Spike";
+    in.sim.stepMode = "Direct"; in.sim.stepProbe = "direct +60.0, update +60.0"; in.sim.steps = 331; in.sim.calls = 331; in.sim.lastCalls = 331;
+    in.sim.dtMin = in.sim.dtMax = 1.f / 240.f;
+    auto R = buildTraceReport(in);
+    CHECK(R.compared); CHECK(R.cmp.ok); CHECK_EQ(R.cmp.firstOver, 302); CHECK(R.headline == "first difference at tick 302");
+    CHECK(R.cmp.verdict == TraceVerdict::NotAShift);
+    CHECK(anyLineHas(R.popup, "FIRST TICK WHERE THEY DIFFER: tick 302"));
+    CHECK(anyLineHas(R.popup, "silent replay P1: x ")); CHECK(anyLineHas(R.popup, "real playback P1: x ")); CHECK(anyLineHas(R.popup, "silent replay P2: x "));   // tsm() has a second player
+    CHECK(anyLineHas(R.popup, "difference (silent - real): dx +0.0000  dy +2.0000"));
+    CHECK(anyLineHas(R.popup, "DIED during tick 330")); CHECK(textHas(R.popup, "the real playback went on (it has tick 331)")); CHECK(!anyLineHas(R.popup, "tick ."));
+    CHECK(anyLineHas(R.log, "the silent replay ended at tick 330, before this tick: nothing to compare here")); CHECK(!anyLineHas(R.log, " of -"));   // the click at 360 is after the death
+    CHECK(textHas(R.popup, "Vertical only (y and yVel; x ignored): no shift in -3..+3 explains it either"));
+    CHECK(anyLineHas(R.popup, "Step mode: Direct")); CHECK(anyLineHas(R.popup, "FPS")); CHECK(anyLineHas(R.popup, "TPS")); CHECK(anyLineHas(R.popup, "click-between-steps: OFF"));
+    CHECK(anyLineHas(R.popup, "RESULT: NOT a tick shift"));
+    CHECK(!anyLineHas(R.popup, "click #"));                                    // the per-click facts are for the log
+    CHECK(anyLineHas(R.result, "Shift test")); CHECK(anyLineHas(R.result, "k=+1:")); CHECK(anyLineHas(R.result, "Frame structure, REAL")); CHECK(anyLineHas(R.result, "Frame structure, SILENT"));
+    CHECK(anyLineHas(R.result, "Click between steps")); CHECK(anyLineHas(R.result, "(start-up check: direct +60.0, update +60.0)"));
+    CHECK(anyLineHas(R.log, "click #2 (P1)"));                                 // the click being held at the death (tick 330): the second click
+    CHECK(anyLineHas(R.log, "NOT the macro tick (+1)"));
+    CHECK(anyLineHas(R.log, "real calls around it"));
+    CHECK(anyLineHas(R.log, "context around tick 302"));
+    CHECK(anyLineHas(R.log, "Killed by: Spike"));
+    CHECK(anyLineHas(R.log, "steps per frame: 3 x 1, 4 x 172"));              // 4 calls per frame, but the frame with the missing call 300 has 3
+    // two numbers per line of the csv header: one row per call, and one row per tick
+    CHECK(R.callsCsv.rfind("call,tick,clock,", 0) == 0); CHECK(R.compareCsv.rfind("tick,silent_x1,", 0) == 0);
+    CHECK_EQ(std::count(R.callsCsv.begin(), R.callsCsv.end(), '\n'), std::ptrdiff_t(tr.calls.size() + 1));
+    CHECK_EQ(std::count(R.compareCsv.begin(), R.compareCsv.end(), '\n'), std::ptrdiff_t(701));
+    // identical traces and a dying step that moves the same: the report says the difference is inside the step
+    auto in2 = in;
+    in2.sim.samples = std::vector<Sample>(base.begin(), base.begin() + 331);
+    auto R2 = buildTraceReport(in2);
+    CHECK(R2.compared); CHECK(R2.cmp.verdict == TraceVerdict::Identical); CHECK(R2.headline == "identical at every compared tick");
+    CHECK(anyLineHas(R2.popup, "NO DIFFERENCE")); CHECK(anyLineHas(R2.popup, "INSIDE the step")); CHECK(anyLineHas(R2.popup, "EQUAL"));
+    // a whole-run shift is described with its direction
+    auto in3 = in;
+    in3.sim.died = false; in3.sim.hasDeathSample = false; in3.sim.endTick = 395;
+    in3.sim.samples.clear();
+    for (int t = 0; t < 400; t++) in3.sim.samples.push_back(base[size_t(t + 2)]);
+    auto R3 = buildTraceReport(in3);
+    CHECK(R3.cmp.verdict == TraceVerdict::ShiftedWhole); CHECK_EQ(R3.cmp.verdictK, 2);
+    CHECK(anyLineHas(R3.popup, "AHEAD of the real game")); CHECK(anyLineHas(R3.popup, "k=+2")); CHECK(textHas(R3.popup, "suspected, not proven"));
+    // a one-player level: player 2 is all zero in both traces, so only player 1 is printed
+    auto base1 = base;
+    for (auto& s : base1) { s.x2 = s.y2 = s.vy2 = 0.f; }
+    RealTrace tr1;
+    tr1.begin(f.macro.macroHash, 4242, "Test Level", ev.size());
+    for (int t = 0; t < 700; t++) { int idx = tr1.beginCall(t, double(t), 1.f / 240.f, 1.f, 0, base1[size_t(t)]); tr1.endCall(idx, double(t) + 1.0); }
+    auto in1 = in;
+    in1.real = &tr1;
+    in1.sim.samples = base1;
+    in1.sim.samples.resize(331);
+    for (int t = 302; t <= 330; t++) in1.sim.samples[size_t(t)].y1 += 2.f;
+    in1.sim.hasDeathSample = true; in1.sim.deathSample = base1[331];
+    auto R1 = buildTraceReport(in1);
+    CHECK(R1.compared); CHECK_EQ(R1.cmp.firstOver, 302);
+    CHECK(anyLineHas(R1.popup, "silent replay: x ")); CHECK(anyLineHas(R1.popup, "real playback: x ")); CHECK(!anyLineHas(R1.popup, "P2"));
+    // no comparison: no trace / another macro / the setting is off
+    TraceInput in4 = in;
+    in4.real = nullptr;
+    auto R4 = buildTraceReport(in4);
+    CHECK(!R4.compared); CHECK(R4.headline.rfind("no comparison:", 0) == 0); CHECK(anyLineHas(R4.popup, "no comparison")); CHECK(anyLineHas(R4.popup, "Replay")); CHECK(anyLineHas(R4.popup, "Analyze"));
+    CHECK(R4.callsCsv.empty() && R4.compareCsv.empty());
+    TraceInput in5 = in;
+    in5.unavailable = "The macro was replaced after the last playback.";
+    auto R5 = buildTraceReport(in5);
+    CHECK(!R5.compared); CHECK(anyLineHas(R5.popup, "replaced after the last playback")); CHECK(anyLineHas(R5.log, "Step mode of the silent replay"));
+    RealTrace emptyTr;
+    emptyTr.begin(1, 1, "L", 0);
+    TraceInput in6 = in;
+    in6.real = &emptyTr;
+    CHECK(!buildTraceReport(in6).compared);
+    // the real trace is cut / the playback was left
+    auto in7 = in;
+    RealTrace cut = tr;
+    cut.truncated = true; cut.end = TraceEnd::Left;
+    in7.real = &cut;
+    CHECK(anyLineHas(buildTraceReport(in7).log, "trace cut"));
+    auto desc = describeRealTrace(tr);
+    CHECK(desc.size() >= 5); CHECK(desc[0].find("700 calls") == std::string::npos);   // 699 calls: tick 300 is missing
+    CHECK(desc[0].find("699 calls") != std::string::npos); CHECK(desc[0].find("the level was completed") != std::string::npos);
+    CHECK(describeRealTrace(RealTrace{}).size() == 1);
+}
+
+TEST(trace_text_helpers) {
+    auto w = wrapLines("aaa bbb ccc ddd", 7);
+    CHECK_EQ(w.size(), size_t(3)); CHECK(w[0] == "aaa bbb"); CHECK(w[1] == "   ccc"); CHECK(w[2] == "   ddd");
+    auto n = wrapLines("ab\ncd", 40);
+    CHECK_EQ(n.size(), size_t(2)); CHECK(n[0] == "ab"); CHECK(n[1] == "cd");
+    auto longWord = wrapLines("abcdefghijklmnopqrstuvwxyz", 8, "");
+    for (const auto& l : longWord) CHECK(l.size() <= 8);
+    std::string joined;
+    for (const auto& l : longWord) joined += l;
+    CHECK(joined == "abcdefghijklmnopqrstuvwxyz");                             // nothing lost
+    auto empty = wrapLines("", 40);
+    CHECK_EQ(empty.size(), size_t(1)); CHECK(empty[0].empty());
+    auto tiny = wrapLines("x y z w v u t s r q", 1);                           // a silly width never loops forever
+    CHECK(!tiny.empty());
+    Sample s{1.5f, 2.25f, -3.f, 10.f, 20.f, 30.f};
+    CHECK(sampleText(s, 0) == "x 1.5000  y 2.2500  yVel -3.0000"); CHECK(sampleText(s, 1) == "x 10.0000  y 20.0000  yVel 30.0000"); CHECK(sampleText(s, 0, false) == "1.5000, 2.2500, -3.0000");
+    CHECK(stepsPerFrameText({}) == "n/a"); CHECK(stepsPerFrameText({{4, 100}}) == "4 x 100");
+    CHECK(stepsPerFrameText({{3, 5}, {4, 100}, {5, 7}}) == "3 x 5, 4 x 100, 5 x 7");
+    CHECK(stepsPerFrameText({{1, 1}, {2, 2}, {3, 3}, {4, 4}}, 2).find("(4 different sizes: 1..4)") != std::string::npos);
 }
 
 int main() {

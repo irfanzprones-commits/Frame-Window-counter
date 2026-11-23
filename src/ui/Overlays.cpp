@@ -5,8 +5,7 @@
 #include <cmath>
 #include <map>
 
-#include "PitchPopup.hpp"
-#include "game/RingSound.hpp"
+#include "core/Trace.hpp"
 #include "game/State.hpp"
 
 using namespace geode::prelude;
@@ -46,6 +45,7 @@ void RecHud::update(float dt) {
         S.fpsAvg = S.fpsAvg * 0.98f + fps * 0.02f;
         S.fpsMin = std::min(S.fpsMin, fps);
     }
+    if (S.trace.recording && !S.sim.active) S.trace.noteFrame(dt);   // v0.3.2: counts the display frames, so the trace can say how many steps ran in each
     using St = gdfwr::SessionModel::State;
     std::string t;
     ccColor3B col{255, 255, 255};
@@ -90,19 +90,10 @@ bool ReplayHud::init(int levelTicks) {
     m_precision->setPosition({win.width * 0.015f, win.height * 0.03f});
     m_precision->setColor({255, 255, 255});
     this->addChild(m_precision);
-    // v0.3.1: the blue ring above the "25+" line opens the pitch popup. A menu only takes a touch that hits its button, every other touch goes on to
-    // the game, so this cannot swallow a click (section 7).
-    auto menu = CCMenu::create();
-    menu->setPosition({0.f, 0.f});
-    auto pitch = CCMenuItemSpriteExtra::create(makeRingIcon(win.height * 0.075f), this, menu_selector(ReplayHud::onPitch));
-    pitch->setPosition({win.width * 0.035f, win.height * 0.915f});
-    menu->addChild(pitch);
-    this->addChild(menu, 20);
     this->refreshText();
     this->scheduleUpdate();
     return true;
 }
-void ReplayHud::onPitch(CCObject*) { openPitchPopup(); }
 void ReplayHud::refreshText() {
     for (int i = 0; i < gdfwr::kReplayBucketCount; i++) {
         char b[48];
@@ -116,42 +107,29 @@ void ReplayHud::refreshText() {
     m_precision->setString(t.c_str());
 }
 void ReplayHud::onAction(PlayLayer* pl, gdfwr::ReplayRing const& ring, CCPoint where) {
-    auto look = gdfwr::ringLook(ring);   // what this ring does: counted / drawn / heard (core/Metrics)
-    if (look.counted) {
+    if (ring.known) {
         m_count[size_t(ring.bucket)]++;
         m_windows.push_back(ring.width);
         this->refreshText();
     }
-    // v0.3.1: the grey "any" ring (a release that never mattered) is not shown at all: no ring, no sound.
-    if (!look.visible) return;
-    auto* mod = Mod::get();
-    m_hold = std::max(0.f, float(mod->getSettingValue<double>("ring-hold")));
-    m_fade = std::max(0.05f, float(mod->getSettingValue<double>("ring-fade")));
-    m_pl = pl;
+    m_hold = std::max(0.f, float(Mod::get()->getSettingValue<double>("ring-hold")));
+    m_fade = std::max(0.05f, float(Mod::get()->getSettingValue<double>("ring-fade")));
     Ring r;
     r.colour = ring.known ? gdfwr::replayBucketColor(ring.bucket) : 0x888888;
-    std::string txt = ring.known ? std::to_string(ring.window) + (ring.plus ? "+" : "") : "?";   // "?" = this click could not be measured
-    // v0.3.1: the ring belongs to the place IN THE LEVEL where the action happened (as before v0.3.0), and update() keeps it there while the
-    // level scrolls. It stays a child of this HUD, so it can never be left behind in the level when the replay stops or the level restarts.
-    // With the setting "ring-follow-level" off it keeps the v0.3.0 behaviour: it stays where it appeared on the screen until it fades.
-    r.level = where;
-    r.follow = mod->getSettingValue<bool>("ring-follow-level");
+    // "?" = this click could not be measured; "any" = measured, but the release never mattered (nothing to count)
+    std::string txt = ring.known ? std::to_string(ring.window) + (ring.plus ? "+" : "") : (ring.insensitive ? "any" : "?");
     r.node = CCNode::create();
-    this->placeRing(r);   // the first position; update() calls the same function every frame while the ring follows the level
+    // v0.3.0: the ring is drawn where the player was ON THE SCREEN when the click happened and stays there while it fades. (Before, it was
+    // fixed in the level and scrolled out of the screen within a second, and a ring that was still alive when the replay stopped stayed in the
+    // level for good.)
+    CCPoint screen = pl->m_objectLayer->convertToWorldSpace(where);
+    r.node->setPosition(this->convertToNodeSpace(screen));
     r.text = label(txt.c_str(), "bigFont.fnt", 0.33f, {0.5f, 0.5f});
     r.text->setColor(rgb(r.colour));
     r.node->addChild(r.text, 1);
     this->addChild(r.node.data(), 10);
     this->paintRing(r, 1.f);
     m_rings.push_back(std::move(r));
-    // v0.3.1: the ring sound, only for a measured window (the grey "?" is silent); the pitch is the one of its label
-    if (look.sound && mod->getSettingValue<bool>("ring-sound")) game::playRingSound(ring.bucket);
-}
-// The place of the ring in the level -> the screen. convertToWorldSpace includes everything the game does to the level (camera, zoom, shake),
-// so the ring sits exactly where that place is drawn now. Only while the level of this HUD is still the current one.
-void ReplayHud::placeRing(Ring& r) {
-    if (!m_pl || m_pl != PlayLayer::get() || !m_pl->m_objectLayer) return;
-    r.node->setPosition(this->convertToNodeSpace(m_pl->m_objectLayer->convertToWorldSpace(r.level)));
 }
 // The circle is drawn again with the opacity it has now (a CCDrawNode has no opacity of its own).
 void ReplayHud::paintRing(Ring& r, float opacity) {
@@ -179,7 +157,6 @@ void ReplayHud::clear() {
 void ReplayHud::update(float dt) {
     for (auto& r : m_rings) {
         r.age += dt;
-        if (r.follow) this->placeRing(r);   // v0.3.1: scrolls away with the level
         float a = gdfwr::ringOpacity(r.age, m_hold, m_fade);
         if (a != r.shown) this->paintRing(r, a);
     }
@@ -280,19 +257,24 @@ std::string flagsText(uint32_t f) {
     return s;
 }
 
-ResultPopup* ResultPopup::create(gdfwr::GdfwrFile const& f) {
+ResultPopup* ResultPopup::create(gdfwr::GdfwrFile const& f, std::vector<std::string> const& extraRows) {
     auto r = new ResultPopup();
-    if (r->init(f)) { r->autorelease(); return r; }
+    if (r->init(f, extraRows)) { r->autorelease(); return r; }
     delete r;
     return nullptr;
 }
-bool ResultPopup::init(gdfwr::GdfwrFile const& f) {
+bool ResultPopup::init(gdfwr::GdfwrFile const& f, std::vector<std::string> const& extraRows) {
     auto win = CCDirector::get()->getWinSize();
     float w = win.width, h = win.height;  // fills the whole screen (Part 10)
     if (!Popup::init(w, h)) return false;
     this->setTitle(f.analysis && f.analysis->incomplete ? "Analysis result (INCOMPLETE)" : "Analysis result");
     auto const& a = *f.analysis;
     std::vector<std::string> rows;
+    // v0.3.2: the silent replay against the real playback comes first (what was measured, not what the analysis concluded from it)
+    if (!extraRows.empty()) {
+        for (auto const& l : extraRows) for (auto const& w : gdfwr::wrapLines(l, 150)) rows.push_back(w);
+        rows.push_back("");
+    }
     auto ids = [&](std::vector<uint32_t> const& v, bool cluster) {
         std::string s;
         for (auto i : v) s += " #" + std::to_string(i + 1) + (cluster ? "" : "");
@@ -326,6 +308,20 @@ bool ResultPopup::init(gdfwr::GdfwrFile const& f) {
             ticks[{p, idx[p]++}] = {e.tick, e.editedTick, recRel, rel2};
         }
     }
+    // v0.3.1: when the Fit moved clicks, the macro in this file is NOT the one that was recorded. That is what made a macro that passes in
+    // normal playback die at its spike (and a tight jump read "13+"), so it is the FIRST thing the result says.
+    {
+        int movedClicks = 0;
+        for (auto const& kv : ticks) {
+            auto const& t = kv.second;
+            if (t[0] != t[1] || t[2] != t[3]) movedClicks++;
+        }
+        if (movedClicks > 0) {
+            addWrapped("WARNING: " + std::to_string(movedClicks) + " click(s) of this macro are NOT at the tick they were recorded at (moved by the Fit, or edited by you). The windows below belong to the ticks the clicks have now, not to the recorded ones.");
+            addWrapped("If the recorded macro passes when you play it back normally, this moved macro may die. Edit clicks > Restore all brings the recorded ticks back.");
+            rows.push_back("");
+        }
+    }
     auto tightest = [&](std::vector<uint32_t> const& v, bool inWin, bool cl) {
         if (v.empty()) return std::string("none");
         auto const& w0 = cl ? a.clusters[v[0]].win : (inWin ? a.clicks[v[0]].in : a.clicks[v[0]].out);
@@ -343,6 +339,7 @@ bool ResultPopup::init(gdfwr::GdfwrFile const& f) {
     std::snprintf(b, sizeof b, "1:%d  2:%d  3:%d  4:%d  5-6:%d  7-10:%d  11-24:%d  25+:%d  N+:%d  CLAMP:%d  UNRELIABLE:%d  RANDOM:%d  NOT_ANALYSED:%d",
                   k.b1, k.b2, k.b3, k.b4, k.b5_6, k.b7_10, k.b11_24, k.b25p, k.nPlus, k.clamp, k.unreliable, k.random, k.notAnalysed);
     rows.push_back(b);
+    addWrapped("A window is the number of ticks a click can sit at and still pass (early + 1 + late). A '+' means one side never ended in a death (it passed every shift that was tested, or a neighbouring click stopped the search), so the window is AT LEAST that wide.");
     if (a.summary.reliableClicks == 0 && !a.clicks.empty())
         addWrapped("NOTHING WAS COUNTED: clicks marked UNRELIABLE, RANDOM or NOT_ANALYSED are never counted (flags at the end of each click below).");
     else if (k.unreliable + k.random + k.notAnalysed > 0) {
@@ -364,7 +361,7 @@ bool ResultPopup::init(gdfwr::GdfwrFile const& f) {
             moved.push_back(s);
         }
         if (!moved.empty()) {
-            addWrapped("The clicks were fitted to the game's timing (the game did not pass the recorded ticks):");
+            addWrapped("The clicks that are not at their recorded tick (moved by the Fit, or edited):");
             for (auto& m : moved) rows.push_back(m);
             addWrapped("   Edit clicks > Restore all brings the recorded ticks back. The windows below are around the ticks the clicks have NOW.");
         }
@@ -406,5 +403,52 @@ bool ResultPopup::init(gdfwr::GdfwrFile const& f) {
     m_mainLayer->addChildAtPosition(scroll, Anchor::BottomLeft, {w * 0.03f, h * 0.08f}, false);
     return true;
 }
+
+// ---- a scrolling text popup with two buttons (v0.3.2) -----------------------------------------------------------------------------------
+ChoicePopup* ChoicePopup::create(std::string const& title, std::vector<std::string> const& rows, std::string const& noText, std::string const& yesText,
+                                 std::function<void(bool)> answer) {
+    auto r = new ChoicePopup();
+    if (r->init(title, rows, noText, yesText, std::move(answer))) { r->autorelease(); return r; }
+    delete r;
+    return nullptr;
+}
+bool ChoicePopup::init(std::string const& title, std::vector<std::string> const& rows, std::string const& noText, std::string const& yesText,
+                       std::function<void(bool)> answer) {
+    auto win = CCDirector::get()->getWinSize();
+    float w = win.width, h = win.height;  // fills the whole screen, like the result view (Part 10)
+    if (!Popup::init(w, h)) return false;
+    m_answer = std::move(answer);
+    this->setTitle(title);
+    // every row is wrapped so that nothing runs off the screen; the list scrolls, the two buttons stay at the bottom
+    std::vector<std::string> lines;
+    for (auto const& r : rows) for (auto const& l : gdfwr::wrapLines(r, 135)) lines.push_back(l);
+    float listW = w * 0.94f, listH = h * 0.66f, rowH = h * 0.034f;
+    auto scroll = ScrollLayer::create({listW, listH});
+    float total = std::max(listH, rowH * float(lines.size()) + 6.f);
+    scroll->m_contentLayer->setContentSize({listW, total});
+    for (size_t i = 0; i < lines.size(); i++) {
+        auto l = label(lines[i].c_str(), "chatFont.fnt", 0.5f, {0.f, 0.5f});
+        l->setPosition({w * 0.01f, total - rowH * (float(i) + 0.5f)});
+        scroll->m_contentLayer->addChild(l);
+    }
+    scroll->moveToTop();
+    m_mainLayer->addChildAtPosition(scroll, Anchor::BottomLeft, {w * 0.03f, h * 0.20f}, false);
+    auto no = CCMenuItemSpriteExtra::create(ButtonSprite::create(noText.c_str()), this, menu_selector(ChoicePopup::onNo));
+    auto yes = CCMenuItemSpriteExtra::create(ButtonSprite::create(yesText.c_str()), this, menu_selector(ChoicePopup::onYes));
+    m_buttonMenu->addChildAtPosition(no, Anchor::Bottom, {-w * 0.15f, h * 0.10f});
+    m_buttonMenu->addChildAtPosition(yes, Anchor::Bottom, {w * 0.15f, h * 0.10f});
+    return true;
+}
+// Whatever closes the popup (a button, the back key, the close button of the base class) answers once; the answer of the callback never runs twice.
+void ChoicePopup::answerOnce(bool yes) {
+    if (m_answered) return;
+    m_answered = true;
+    auto answer = std::move(m_answer);
+    Popup::onClose(nullptr);
+    if (answer) answer(yes);
+}
+void ChoicePopup::onNo(CCObject*) { this->answerOnce(false); }
+void ChoicePopup::onYes(CCObject*) { this->answerOnce(true); }
+void ChoicePopup::onClose(CCObject*) { this->answerOnce(false); }
 
 }  // namespace gdfwr::ui

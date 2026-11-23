@@ -6,19 +6,11 @@
 		"mac": "2.2081",
 		"ios": "2.2081"
 	},
-	"version": "v0.3.1",
+	"version": "v0.3.2",
 	"id": "clirfan.gdfwr",
 	"name": "GDFWR - Frame Window Recorder",
 	"developer": "clirfan",
 	"description": "Records a run, proves it by replay, and measures the frame window of every click.",
-	"resources": {
-    "sprites": [
-        "resources/*.png"
-    ],
-    "files": [
-        "resources/*.wav"
-    ]
-},
 	"tags": [
 		"utility",
 		"gameplay"
@@ -58,16 +50,16 @@
 			"type": "title",
 			"name": "Analyze / verification"
 		},
-		"auto-repair": {
+		"fit-clicks": {
 			"type": "bool",
-			"name": "Fit the clicks to the game when the macro does not pass",
-			"description": "A recording made at a low frame rate is only exact to one frame, so a click can be a few ticks off. When the player dies during the check, the click that was active is moved by the smallest amount that gets the run past that point (+1, -1, +2, -2 ... ticks) until the run reaches the end of the level. Every moved click is listed in the result (recorded -> now) and Edit clicks > Restore all brings the recorded ticks back. Off = the check just reports the failure.",
-			"default": true
+			"name": "Fit: MOVE clicks until the silent replay passes (changes your macro)",
+			"description": "OFF (default): Analyze replays your macro exactly as recorded and never moves a click. If the silent replay dies, it says so and your macro stays as it is. ON: when the silent replay dies, the click that was active is moved by the smallest amount that gets the run past that point (+1, -1, +2, -2 ... ticks). That fits the macro to the SILENT replay, not to the real game: a macro that passes in normal playback can come out of it worse (it can die at the spike). Every moved click is listed in the result (recorded -> now) and Edit clicks > Restore all brings the recorded ticks back.",
+			"default": false
 		},
 		"repair-max-shift": {
 			"type": "int",
 			"name": "Fit: largest shift (ticks)",
-			"description": "How far a click is moved in each direction before giving up. It is never smaller than one frame of the recording (240 / FPS ticks) plus 2, so a recording made at 14 FPS is searched 19 ticks each way whatever this says.",
+			"description": "Only used when the Fit above is on. How far a click is moved in each direction before giving up. It is never smaller than one frame of the recording (240 / FPS ticks) plus 2, so a recording made at 14 FPS is searched 19 ticks each way whatever this says.",
 			"default": 10,
 			"min": 1,
 			"max": 60
@@ -119,7 +111,7 @@
 		"ring-hold": {
 			"type": "float",
 			"name": "Ring: seconds fully visible",
-			"description": "A ring appears at once (no animation) and stays at full strength for this long. A ring that stays in the level scrolls off the screen in about a second at normal speed, so the two times matter mostly in slow parts, or when the setting \"Ring stays in the level\" is off.",
+			"description": "A ring appears at once (no animation) and stays at full strength for this long.",
 			"default": 1.0,
 			"min": 0.0,
 			"max": 10.0
@@ -132,29 +124,15 @@
 			"min": 0.1,
 			"max": 10.0
 		},
-		"ring-follow-level": {
-			"type": "bool",
-			"name": "Ring stays in the level",
-			"description": "On (default): a ring is fixed in the level at the place of the click or release and scrolls away with the level. Off: it stays where it appeared on the screen until it has faded. (The grey \"any\" ring, a release that never mattered, is not shown at all.)",
-			"default": true
-		},
-		"title-sound": {
+		"title-diagnostics": {
 			"type": "title",
-			"name": "Ring sound"
+			"name": "Diagnostics"
 		},
-		"ring-sound": {
+		"trace-playback": {
 			"type": "bool",
-			"name": "Play a sound when a ring appears",
-			"description": "Plays classic.wav for every ring with a measured window; the grey ? ring is silent. Every label has its own pitch: set it with the blue Ring pitch button in the GDFWR panel, or with the small blue ring above the counters during a replay.",
+			"name": "Record the real playback and compare it with the silent replay",
+			"description": "ON (default): while Replay plays your macro in the level, the mod notes the position and y velocity of the player at the start of every physics step (about 240 per second, at most 12 minutes). When the silent replay of Analyze ends, the two are compared tick by tick: the first tick where they differ, both sets of values, whether one equals the other shifted by a few ticks, the step mode, FPS, TPS and click-between-steps. The result goes into the popup, the result screen, the Geode log (lines GDFWR-TRACE) and two csv files next to your recordings. It only MEASURES: no click is moved and nothing about the replay or the silent replay changes. OFF: nothing is recorded and no comparison is made.",
 			"default": true
-		},
-		"ring-sound-volume": {
-			"type": "float",
-			"name": "Ring sound volume",
-			"description": "0 = silent, 1 = full volume.",
-			"default": 1.0,
-			"min": 0.0,
-			"max": 1.0
 		},
 		"title-keys": {
 			"type": "title",
